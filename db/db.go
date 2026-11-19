@@ -206,6 +206,9 @@ ON CONFLICT (name) DO NOTHING`,
 	if err := d.seedDefaultInterceptRulesV2(); err != nil {
 		return fmt.Errorf("seed intercept rules v2: %w", err)
 	}
+	if err := d.seedTaskTemplates(); err != nil {
+		return fmt.Errorf("seed task templates: %w", err)
+	}
 	return nil
 }
 

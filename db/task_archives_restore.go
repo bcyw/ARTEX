@@ -284,6 +284,9 @@ WHERE archive.id=$1 `, archiveID).Scan(&taskID, &expID, &state); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
 	}
+	if err := insertArchiveRows(tx, "finding_report_sections", remappedTables["finding_report_sections"]); err != nil {
+		return nil, fmt.Errorf("restore finding_report_sections: %w", err)
+	}
 	if err := restoreFindingTrafficTx(tx, snapshot); err != nil {
 		return nil, fmt.Errorf("restore finding traffic: %w", err)
 	}
@@ -393,7 +396,8 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	allowed := map[string]bool{
 		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
 		"task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,
-		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true,
+		"finding_report_sections": true,
+		"llm_records":             true, "llm_usage": true, "skill_usage": true, "tool_usage": true,
 		"side_question_sessions": true, "side_question_requests": true,
 	}
 	if !allowed[table] {

@@ -138,11 +138,17 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				}
 				return actool.RenderDeferredToolsBlock(reveal)
 			}
+			// 场景化引导：SDK 内置 description 是通用的("task matches one of the
+			// available skills")。渗透场景下 agent 常常"能自己 curl 就不调技能"，
+			// 这里追加一句把「先载入再动手」的优先级讲清，不重复各技能的触发
+			// 条件(那是各 SKILL.md description 的职责,单一事实源)。
+			skillTool := agent.DecorateTool(reg.Tool(), reg.Tool().Description()+
+				"\n渗透任务中：当前步骤匹配某个技能的适用场景时，先调用它载入指引再动手，不要凭手生做——技能正文包含经过验证的脚本用法与边界，能省大量试错。", nil)
 			// Attribution for the usage ledger: ToolAugment only gets (ctx, agentKey),
 			// so the run's task/session ids ride in on the ctx (agent.RunInfo). Read it
 			// once here — this closure is rebuilt per run, so the captured value always
 			// belongs to this run.
-			extra = append(extra, meterSkillTool(reg.Tool(), pg, reg, a.Key, agent.RunInfoFrom(ctx)))
+			extra = append(extra, meterSkillTool(skillTool, pg, reg, a.Key, agent.RunInfoFrom(ctx)))
 		}
 
 		// host tools (traffic / orchestration / custom) — added to every agent's base;

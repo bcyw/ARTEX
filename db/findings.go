@@ -47,13 +47,17 @@ const (
 	FindingIgnored       = "ignored"        // 忽略
 	FindingDuplicate     = "duplicate"      // 重复
 	FindingRiskAccepted  = "risk_accepted"  // 风险接受
+	// FindingQuarantined 是 SRC 黑名单硬闸的隔离区：report_finding 命中黑名单且
+	// 无升级证据时入库到此状态,供人工检查——不删除(避免静默丢失)、不进交付
+	// 报告(报告只取 confirmed)。人工核实确有升级证据后可改回 pending/confirmed。
+	FindingQuarantined = "quarantined" // 隔离(黑名单拦截)
 )
 
 // ValidFindingStatus reports whether s is a known triage state.
 func ValidFindingStatus(s string) bool {
 	switch s {
 	case FindingPending, FindingInProgress, FindingConfirmed, FindingResolved, FindingFixed,
-		FindingFalsePositive, FindingIgnored, FindingDuplicate, FindingRiskAccepted:
+		FindingFalsePositive, FindingIgnored, FindingDuplicate, FindingRiskAccepted, FindingQuarantined:
 		return true
 	}
 	return false

@@ -516,9 +516,12 @@ func (s *Server) seedOrchestrationTools() {
 	s.reseedMainAgentPrompt()         // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
 	s.reseedPlannerPrompt()           // planner 提示词:重写「0 意图」正当理由 + 加量化验收核对(一次性)
 	s.reseedWorkerPrompt()            // worker 提示词:加否定结论证据门槛(一次性)
+	s.reseedPentestPrompt()           // pentest 提示词:SRC 挖掘导向(路线按可收性排序+走透=实际危害)(一次性)
 	s.seedReporterAgent()             // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
 	s.upgradeReporterTriggerMessage() // 老库补迁移:让 reporter 回传 evidence_version(一次性)
+	s.reseedReporterPrompt()         // reporter 提示词重写为 SRC 提交稿标准(一次性)
 	s.seedFindingTrafficTools()       // 增加可选证据参数及只读证据工具，保留用户配置
+	s.seedFindingReportFields()       // report_finding 增加交付报告分节字段(description/impact/remediation/session)
 	s.seedFindingWorkflowTools()
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
@@ -586,7 +589,7 @@ func (s *Server) unbindGoalMetDefault() {
 // 旧的版本仍保留在历史里,用户若自定义过可从版本记录找回。settings flag 守卫 → 只做一次;
 // 以后默认再变就 bump 这个 flag。全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。
 func (s *Server) reseedGoalsPrompt() {
-	const flag = "goals_prompt_constraint_step_v1"
+	const flag = "goals_prompt_src_mining_v2"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -616,7 +619,7 @@ func (s *Server) reseedGoalsPrompt() {
 // 保留在历史里,用户若自定义过可从版本记录找回。settings flag 守卫 → 只做一次。全新库无需处理
 // (SeedPromptIfEmpty 已 seed 最新默认)。与 reseedGoalsPrompt 完全同构。
 func (s *Server) reseedMainAgentPrompt() {
-	const flag = "mainagent_prompt_goalless_intent_v1"
+	const flag = "mainagent_prompt_src_mining_v2"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -647,7 +650,7 @@ func (s *Server) reseedMainAgentPrompt() {
 // 找回。settings flag 守卫 → 只做一次。全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。与
 // reseedGoalsPrompt 完全同构。
 func (s *Server) reseedPlannerPrompt() {
-	const flag = "planner_prompt_compact_realistic_v2"
+	const flag = "planner_prompt_src_mining_v3"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -677,7 +680,7 @@ func (s *Server) reseedPlannerPrompt() {
 // SeedPromptIfEmpty 首插入only,旧库已有版本收不到,故用版本管理【追加一个新版本】并切过去,旧版本仍保留在历史里可找回。
 // settings flag 守卫 → 只做一次。全新库无需处理。与 reseedGoalsPrompt 完全同构。
 func (s *Server) reseedWorkerPrompt() {
-	const flag = "worker_prompt_compact_v4"
+	const flag = "worker_prompt_src_mining_v5"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -699,6 +702,36 @@ func (s *Server) reseedWorkerPrompt() {
 		return
 	}
 	log.Printf("[prompts] worker 提示词已追加新默认版本(查上下文段收敛为 list_assets/list_findings,去掉 list_facts/node_detail/asset_neighbors,一次性)")
+}
+
+// reseedPentestPrompt 把 pentest 提示词刷成【当前代码默认】——默认正文加入 SRC 挖掘导向:
+// 路线组合按 SRC 可收性排序(业务逻辑面优先级不低于注入类)、走透=挖到实际危害、
+// 判定达成以实际危害证据为准。SeedPromptIfEmpty 首插入only,旧库已有版本收不到,故用版本管理
+// 【追加一个新版本】并切过去,旧版本仍保留在历史里可找回。settings flag 守卫 → 只做一次;
+// 全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。与 reseedGoalsPrompt 完全同构。
+func (s *Server) reseedPentestPrompt() {
+	const flag = "pentest_prompt_src_mining_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
+	a, err := s.m.pg.GetAgentByKey("pentest")
+	if err != nil || a == nil {
+		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
+	}
+	tmpl := agent.BuiltinPromptSeeds()["pentest"]
+	if tmpl == "" {
+		return
+	}
+	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
+	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
+		return
+	}
+	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
+		log.Printf("[prompts] pentest 提示词重刷为新默认失败: %v", err)
+		return
+	}
+	log.Printf("[prompts] pentest 提示词已追加新默认版本(SRC 挖掘导向,一次性)")
 }
 
 // reporterToolCallMessage 必须无条件要求先读一次 get_finding_traffic 再写报告。
@@ -743,6 +776,31 @@ func (s *Server) upgradeReporterTriggerMessage() {
 		}
 		log.Printf("[reporter] 触发消息已升级为读取并回传 evidence_version")
 	}
+}
+
+// reseedReporterPrompt 把 reporter 提示词刷成【当前代码默认】——默认正文按 SRC 提交稿
+// 标准重写(首屏判决/原始报文 PoC/证据密度/去 AI 腔)。SeedPromptIfEmpty 首插入only,旧库
+// 已有版本收不到,故用版本管理【追加一个新版本】并切过去,旧版本仍保留在历史里可找回。
+// settings flag 守卫 → 只做一次;全新库无需处理。与 reseedGoalsPrompt 完全同构。
+func (s *Server) reseedReporterPrompt() {
+	const flag = "reporter_prompt_src_submission_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
+	a, err := s.m.pg.GetAgentByKey("reporter")
+	if err != nil || a == nil {
+		return // 用户删过 reporter 或全新库——seedReporterAgent/无此 agent,无需迁移
+	}
+	// 全新库 seedReporterAgent 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
+	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == agent.ReporterDefaultPrompt {
+		return
+	}
+	if _, err := s.m.pg.ResetPromptToDefault(a.ID, agent.ReporterDefaultPrompt); err != nil {
+		log.Printf("[prompts] reporter 提示词重刷为新默认失败: %v", err)
+		return
+	}
+	log.Printf("[prompts] reporter 提示词已追加新默认版本(SRC 提交稿标准,一次性)")
 }
 
 // seedReporterAgent 预置一个「报告撰写」自定义 agent(builtin=false，可在 UI 编辑/删除)：

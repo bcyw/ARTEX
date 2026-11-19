@@ -10,6 +10,10 @@ import (
 
 const findingIDGuidance = "\n\n**漏洞编号约定**：finding_id 是独立漏洞记录 ID；finding_node_id 是探索节点 ID。list_findings / list_task_findings / node_detail / get_task_node_detail 的 id 保留为探索节点 ID，应从同一返回的 finding_id 读取独立编号。get_finding_traffic / bind_finding_traffic 用独立 finding_id。旧 update_finding_report 的 finding_id 参数仍传 finding_node_id。不要把 report_finding 第一行的数字用于证据工具，也不要遇到编号错误后猜测其他数字。"
 
+// reportFindingDeliverableNote is appended at runtime so existing databases
+// receive it without reseeding the seeded tool description.
+const reportFindingDeliverableNote = "\ndescription / impact / remediation 会被原样写进交付报告：直接写功能与根因、已验证影响、可执行修复；不写工具名、检索过程、“未绑定流量”之类过程说明。session 可选，填复验所需的账号与会话上下文。"
+
 // The server supplies the persisted setting. A missing setting/host is off.
 // Consulted at assembly and again on writes so an already-running session
 // cannot keep binding after the user switches the feature off.
@@ -33,7 +37,15 @@ func findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.Co
 				continue
 			}
 			switch tool.Name() {
-			case "report_finding", "add_hint", "add_task_hint":
+			case "report_finding":
+				// Work on a copy: toggling back on must restore the original schema.
+				raw, _ := json.Marshal(tool.InputSchema())
+				var schema map[string]any
+				if json.Unmarshal(raw, &schema) == nil {
+					stripTrafficParameters(schema)
+					tool = DecorateTool(tool, tool.Description()+reportFindingDeliverableNote, schema)
+				}
+			case "add_hint", "add_task_hint":
 				// Work on a copy: toggling back on must restore the original schema.
 				raw, _ := json.Marshal(tool.InputSchema())
 				var schema map[string]any
@@ -53,7 +65,7 @@ func findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.Co
 		note := ""
 		switch tool.Name() {
 		case "report_finding":
-			note = "\n默认由报告 Agent 在编写报告前核对并绑定流量。上报者在 evidence 中保留验证命令、关键输出、已有的真实流量 ID 及其用途，供报告 Agent 对照执行记录核实；无需为绑定额外查包。兼容显式即时绑定：traffic_refs 或 evidence_hint_id 可提交已核实的引用，后者读取本任务指定 hint 的结构化引用；任一无效则本次上报全部失败。TCP/无包不需要这些可选参数。返回 finding_id 与 finding_node_id 分别表示独立记录和探索节点。"
+			note = reportFindingDeliverableNote + "\n默认由报告 Agent 在编写报告前核对并绑定流量。上报者在 evidence 中保留验证命令、关键输出、已有的真实流量 ID 及其用途，供报告 Agent 对照执行记录核实；无需为绑定额外查包。兼容显式即时绑定：traffic_refs 或 evidence_hint_id 可提交已核实的引用，后者读取本任务指定 hint 的结构化引用；任一无效则本次上报全部失败。TCP/无包不需要这些可选参数。返回 finding_id 与 finding_node_id 分别表示独立记录和探索节点。"
 		case "add_hint", "add_task_hint":
 			note = "\n交接已确认漏洞时，在对应提示的 traffic_refs 中保留已核实流量的 ID、用途、说明和顺序（单条放顶层，批量放对应 hints 元素），并在 text 中说明它证明的具体漏洞。调用方不能只交接文字而丢弃已有流量引用。未核实的候选不能作为证据传递。"
 		case "get_finding_traffic", "bind_finding_traffic", "list_findings", "list_task_findings", "node_detail", "get_task_node_detail", "update_finding_report":
@@ -78,6 +90,11 @@ func findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.Co
 	}
 	if guidance != "" || has["get_finding_traffic"] || has["update_finding_report"] {
 		guidance += findingIDGuidance
+	}
+	// SRC 收取标准只在 agent 能产出 finding 时注入(report_finding 在工具集中);
+	// 只读角色(list_findings 旁观者等)不背这段纪律。
+	if has["report_finding"] {
+		guidance = findingGuidanceWithStandards(guidance)
 	}
 	return out, guidance
 }

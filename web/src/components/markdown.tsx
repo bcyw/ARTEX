@@ -1,7 +1,20 @@
 "use client";
 
+import * as React from "react";
+
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+import { HttpCodeBlock } from "@/components/http-code-block";
+
+// codeText flattens a fenced block's children. react-markdown hands a single
+// text child to <code>, but arrays are tolerated so the copy button gets the
+// exact packet text.
+function codeText(children: React.ReactNode): string {
+  return React.Children.toArray(children)
+    .map((child) => (typeof child === "string" ? child : ""))
+    .join("");
+}
 
 // Tailwind-styled element overrides (no typography plugin in this project, so we
 // style each element). `node` is stripped — it's not a valid DOM attribute.
@@ -21,9 +34,22 @@ const components: Components = {
   blockquote: ({ node, ...p }) => (
     <blockquote className="my-1 border-l-2 border-border pl-2.5 text-muted-foreground" {...p} />
   ),
-  pre: ({ node, ...p }) => (
-    <pre className="my-1.5 overflow-auto rounded-md bg-muted/70 p-2.5 text-xs leading-relaxed" {...p} />
-  ),
+  // ```http blocks are replay packets: render them with a per-packet copy button
+  // so a reviewer can paste one straight into Burp Repeater or Yakit.
+  pre: ({ node, children, ...p }) => {
+    const code = React.Children.toArray(children)[0];
+    if (React.isValidElement(code)) {
+      const props = code.props as { className?: string; children?: React.ReactNode };
+      if (/\blanguage-http\b/.test(props.className || "")) {
+        return <HttpCodeBlock raw={codeText(props.children)} />;
+      }
+    }
+    return (
+      <pre className="my-1.5 overflow-auto rounded-md bg-muted/70 p-2.5 text-xs leading-relaxed" {...p}>
+        {children}
+      </pre>
+    );
+  },
   code: ({ node, className, children, ...rest }) => {
     const block = /language-/.test(className || "");
     return block ? (

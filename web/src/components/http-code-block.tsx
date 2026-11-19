@@ -17,7 +17,9 @@ function statusTone(status: number) {
 }
 
 function StartLine({ line }: { line: string }) {
-  const response = /^(HTTP\/\S+)(\s+)(\d{3})(.*)$/.exec(line);
+  // Evidence snapshots keep the captured start line, which may be "HTTP 200"
+  // rather than "HTTP/1.1 200 OK"; never invent the missing version here.
+  const response = /^(HTTP(?:\/\S+)?)(\s+)(\d{3})(.*)$/.exec(line);
   if (response) {
     return (
       <>

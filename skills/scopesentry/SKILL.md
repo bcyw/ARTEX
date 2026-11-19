@@ -1,7 +1,8 @@
 ---
-
-## name: scopesentry-mcp
-description: 通过 ScopeSentry MCP 管理安全扫描平台（项目、任务、模板、资产、节点）。在用户提到 ScopeSentry、MCP、API Key、扫描任务、资产查询时使用。
+name: scopesentry
+description: 通过 ScopeSentry MCP 管理安全扫描平台（项目、任务、模板、资产、节点）。在需要把 ScopeSentry 的扫描结果/资产数据接入本任务、或操作 ScopeSentry 平台（建项目、下发扫描任务、查资产）时调用。
+mcps: ScopeSentry
+---
 
 # ScopeSentry MCP 使用指南
 

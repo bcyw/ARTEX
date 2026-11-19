@@ -586,6 +586,17 @@ CREATE TABLE IF NOT EXISTS findings (
     created_at  DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now') || '000000+00:00')
 );
 
+-- 报告正文的分节内容，与 findings 一一对应。单独建表而不是给 findings 加列：
+-- 本仓库没有迁移框架，新增列需要显式迁移；新表在每次启动时由本文件创建。
+CREATE TABLE IF NOT EXISTS finding_report_sections (
+    finding_id  INTEGER PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,
+    description TEXT NOT NULL DEFAULT '',
+    impact      TEXT NOT NULL DEFAULT '',
+    remediation TEXT NOT NULL DEFAULT '',
+    session     TEXT NOT NULL DEFAULT '',
+    updated_at  DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now') || '000000+00:00')
+);
+
 CREATE TABLE IF NOT EXISTS finding_retests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     finding_id INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,

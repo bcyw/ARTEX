@@ -469,7 +469,7 @@ export interface TaskConstraint {
 // ---- Findings ----
 export type Severity = "critical" | "high" | "medium" | "low";
 
-// 漏洞处置状态:待处理 / 处理中 / 已确认 / 已处理 / 已修复 / 误报 / 忽略 / 重复 / 风险接受。
+// 漏洞处置状态:待处理 / 处理中 / 已确认 / 已处理 / 已修复 / 误报 / 忽略 / 重复 / 风险接受 / 隔离(黑名单拦截)。
 export type FindingStatus =
   | "pending"
   | "in_progress"
@@ -479,7 +479,8 @@ export type FindingStatus =
   | "false_positive"
   | "ignored"
   | "duplicate"
-  | "risk_accepted";
+  | "risk_accepted"
+  | "quarantined";
 
 // FindingAsset 是一个漏洞绑定的资产(已在后端预渲染 label)。
 export interface FindingAsset {

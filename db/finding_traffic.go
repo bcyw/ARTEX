@@ -372,6 +372,13 @@ type RecordFindingInput struct {
 	TaskID, ExplorationID, IntentID                      int64
 	VulnClass, Name, Severity, Summary, Evidence, Worker string
 	AssetIDs                                             []int64
+	// 交付物正文（报告分节）。与 Summary 分离：Summary 是工作摘要，
+	// 可能带过程叙述；这些字段按报告文体书写。
+	Description, Impact, Remediation, Session string
+	// Quarantine: true = 命中 SRC 黑名单且无升级证据 → 入库 status='quarantined'
+	// (隔离区,不进交付报告)。由 agent 层的硬闸判定(SrcFindingBlocked)填入;
+	// db 层不重复判定,保持单一职责。
+	Quarantine bool
 }
 
 type RecordedFinding struct {
@@ -425,9 +432,23 @@ VALUES($1,'finding',$2,9,'confirmed',$3) RETURNING id`, in.ExplorationID, string
 		assets = []int64{}
 	}
 	raw, _ := json.Marshal(assets)
-	if err := tx.QueryRow(`INSERT INTO findings(task_id,node_id,vulnclass,name,severity,summary,evidence,worker,asset_ids)
-VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, in.TaskID, out.NodeID, in.VulnClass, in.Name, in.Severity, in.Summary, in.Evidence, in.Worker, string(raw)).Scan(&out.FindingID); err != nil {
+	findingStatus := "pending"
+	if in.Quarantine {
+		findingStatus = "quarantined"
+	}
+	if err := tx.QueryRow(`INSERT INTO findings(task_id,node_id,vulnclass,name,severity,summary,evidence,worker,asset_ids,status)
+VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, in.TaskID, out.NodeID, in.VulnClass, in.Name, in.Severity, in.Summary, in.Evidence, in.Worker, string(raw), findingStatus).Scan(&out.FindingID); err != nil {
 		return nil, err
+	}
+	if in.Description != "" || in.Impact != "" || in.Remediation != "" || in.Session != "" {
+		if _, err := tx.Exec(`INSERT INTO finding_report_sections(finding_id,description,impact,remediation,session)
+VALUES($1,$2,$3,$4,$5)
+ON CONFLICT(finding_id) DO UPDATE SET description=excluded.description, impact=excluded.impact,
+    remediation=excluded.remediation, session=excluded.session,
+    updated_at=(strftime('%Y-%m-%d %H:%M:%f','now') || '000000+00:00')`,
+			out.FindingID, in.Description, in.Impact, in.Remediation, in.Session); err != nil {
+			return nil, err
+		}
 	}
 	// 在**同一事务**里登记一条推送事件：提交即保证「漏洞落库」与「推送任务存在」
 	// 原子一致，不存在提交成功却没入队、消息永久丢失的窗口。

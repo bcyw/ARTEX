@@ -25,7 +25,9 @@ web/next-env.d.ts
 *.swo
 
 # docs
-/docs/
+/docs/*
+!/docs/agents/
+!/docs/adr/
 
 # os
 .DS_Store

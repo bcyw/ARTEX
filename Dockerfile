@@ -29,6 +29,10 @@ FROM golang:1.27.4-bookworm AS gobuild
 # .dockerignore 排除了 .git，镜像内拿不到 git describe，版本号由构建参数传入。
 # 缺省 dev：页面一键更新会对 dev 构建禁用，Docker 部署本就应通过重建镜像升级。
 ARG ARTEX_VERSION=dev
+# GOPROXY：网络受限环境（如 proxy.golang.org 不可达）可在 .env 里覆盖为
+# https://goproxy.cn,direct；留空走 Go 官方默认值。
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -58,6 +62,10 @@ RUN npm install -g @playwright/mcp@0.0.83 @playwright/cli@0.1.22 playwright@1.64
     && playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
+# Playwright 浏览器下载镜像：默认官方 CDN；网络受限环境可在 .env 里设为
+# https://cdn.npmmirror.com/binaries/playwright 加速。
+ARG PLAYWRIGHT_DOWNLOAD_HOST=
+ENV PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST}
 # 守护启动脚本：进程退出后按退出码决定是否重新拉起，页面一键更新靠它完成换装。
 # 它同时负责把 SIGTERM 转发给 artex —— docker stop 只把信号发给 PID 1，
 # 不转发的话 artex 收不到、做不了优雅关闭，10 秒后被 SIGKILL 硬杀。

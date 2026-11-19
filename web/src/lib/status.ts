@@ -73,6 +73,7 @@ const finding: Record<string, StatusMeta> = {
   ignored: { label: "忽略", tone: "neutral" },
   duplicate: { label: "重复", tone: "neutral" },
   risk_accepted: { label: "风险接受", tone: "violet" },
+  quarantined: { label: "隔离", tone: "amber" },
 };
 
 const engine: Record<string, StatusMeta> = {

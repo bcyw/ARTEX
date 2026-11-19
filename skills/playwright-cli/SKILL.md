@@ -1,7 +1,6 @@
 ---
 name: playwright-cli
-description: Automate browser interactions, test web pages and work with Playwright tests.
-allowed-tools: Bash(playwright-cli:*) Bash(npx:*) Bash(npm:*)
+description: 需要真实浏览器环境时调用：登录/注册/密码找回等需要执行 JS/验证码/多步交互的流程、SPA 页面渲染后的 DOM 检查、XSS payload 在真实浏览器中的渲染验证、抓取 JS 动态渲染的接口。curl 拿不到渲染后内容或交互流程走不通时用它。
 ---
 
 # Browser Automation with playwright-cli
