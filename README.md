@@ -278,6 +278,8 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 
 **兼容 OpenAI 的网关**：任何提供 OpenAI 风格 `/v1/chat/completions` 接口的服务，都可用 **OpenAI** 格式接入，无需专用格式。新建一个格式为 **OpenAI** 的配置，**Base URL** 填网关的 `/v1` 根地址，粘贴密钥，再点「模型」旁的 **↻** 从该服务目录（`GET /v1/models`）加载并选择模型；服务后续新增的模型会在下次刷新时出现。例如 [NotHoly](https://notholy.com)（面向攻击性安全的模型）：Base URL 为 `https://api.notholy.com/v1`，密钥在其控制台获取。
 
+**连接 NotHoly 的 MCP（可选）**：除了模型，NotHoly 还提供一个 MCP 服务，接入后为 agent 增加一组攻击性安全工具与知识检索。在「系统设置」里添加一个远程 MCP，传输选 `http`（Streamable HTTP），URL 填 `https://api.notholy.com/mcp`，请求头填 `Authorization=Bearer <NOTHOLY_API_KEY>`（与上面 LLM 用的是同一个密钥）。接入后可用的工具包括漏洞与安全公告检索（`cve_lookup` / `cve_search` / `advisory_query`）、知识库检索（`kb_search` / `kb_read`）、联网检索与取证（`web_search` / `read_url` / `analyze_file`）、被动资产情报（`ip_info` / `domain_info` / `asn_lookup` / `site_check`）等。
+
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 
 **常用参数**：`./start.sh -addr :8787 -proxy :8788`（`-addr` 前端+API，`-proxy` 流量录制代理）。启动脚本会把参数原样透传给 `artex`。
