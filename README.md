@@ -276,6 +276,8 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 **LLM**：`export ANTHROPIC_API_KEY=sk-...`（或 `OPENAI_API_KEY`），也可在 UI 的「LLM 配置」页填写。
 可选：`ARTEX_LLM_PROVIDER` / `ARTEX_LLM_MODEL` / `ARTEX_LLM_BASE_URL` / `ARTEX_LLM_PROXY`。
 
+**兼容 OpenAI 的网关**：任何提供 OpenAI 风格 `/v1/chat/completions` 接口的服务，都可用 **OpenAI** 格式接入，无需专用格式。新建一个格式为 **OpenAI** 的配置，**Base URL** 填网关的 `/v1` 根地址，粘贴密钥，再点「模型」旁的 **↻** 从该服务目录（`GET /v1/models`）加载并选择模型；服务后续新增的模型会在下次刷新时出现。例如 [NotHoly](https://notholy.com)（面向攻击性安全的模型）：Base URL 为 `https://api.notholy.com/v1`，密钥在其控制台获取。
+
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 
 **常用参数**：`./start.sh -addr :8787 -proxy :8788`（`-addr` 前端+API，`-proxy` 流量录制代理）。启动脚本会把参数原样透传给 `artex`。
