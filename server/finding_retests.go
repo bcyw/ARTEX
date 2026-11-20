@@ -237,6 +237,14 @@ func (s *Server) seedFindingRetester() error {
 	return tx.Commit()
 }
 
+// reseedRetesterPrompt 把 retester 提示词刷成【当前代码默认】——默认正文新增了「复测纪律
+// （SRC 收取标准）」段落（reproduced 门槛与上报一致、连续 2 次 inconclusive 判误报）。
+// seedFindingRetester 受 finding_retester_seed_v1 守卫且只在首次建 agent 时写提示词,
+// 旧库已 seed 的版本收不到新增内容。以后默认再变就 bump flag。
+func (s *Server) reseedRetesterPrompt() {
+	s.reseedPromptToDefault(db.FindingRetestAgentKey, "retester_prompt_src_acceptance_v1", agent.RetesterDefaultPrompt, "复测纪律 SRC 收取标准")
+}
+
 func (s *Server) finishRetest(id int64, status, reason string) {
 	if err := s.m.pg.FinishFindingRetest(id, status, reason); err != nil {
 		// Surface failure to the conversation runner rather than inventing a result.

@@ -72,7 +72,7 @@ func normalize(head string, body []byte, fallbackURL string, request bool) (stri
 	}
 
 	if request && !hasHost {
-		if host := hostOf(fallbackURL); host != "" {
+		if host := HostOf(fallbackURL); host != "" {
 			out = append(out[:1], append([]string{"Host: " + host}, out[1:]...)...)
 		}
 	}
@@ -147,7 +147,9 @@ func headerValue(headers []string, name string) string {
 	return ""
 }
 
-func hostOf(rawURL string) string {
+// HostOf extracts the host[:port] of a URL, empty on parse failure. Exported
+// for the report assembler (server), which lists affected assets the same way.
+func HostOf(rawURL string) string {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
 		return ""

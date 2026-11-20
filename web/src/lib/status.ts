@@ -1,6 +1,8 @@
 // Centralised status → color/label semantics, reused across the whole app.
 // Spec §8.3: 意图 / 覆盖 / 任务 / 严重度 each have a consistent color set.
 
+import type { FindingStatus } from "@/lib/types";
+
 export type Tone = "neutral" | "blue" | "green" | "amber" | "red" | "rose" | "violet" | "slate";
 
 export const toneClasses: Record<Tone, string> = {
@@ -63,7 +65,8 @@ const severity: Record<string, StatusMeta> = {
   low: { label: "低危", tone: "slate" },
 };
 
-const finding: Record<string, StatusMeta> = {
+// 键类型钉死为 FindingStatus：types.ts 加状态而这里漏配色时编译报错。
+const finding: Record<FindingStatus, StatusMeta> = {
   pending: { label: "待处理", tone: "amber" },
   in_progress: { label: "处理中", tone: "blue" },
   confirmed: { label: "已确认", tone: "red" },
@@ -75,6 +78,10 @@ const finding: Record<string, StatusMeta> = {
   risk_accepted: { label: "风险接受", tone: "violet" },
   quarantined: { label: "隔离", tone: "amber" },
 };
+
+// 漏洞状态全集（顺序即筛选/下拉的展示顺序），由 finding map 派生——
+// 全 app 共享这一份，别处不要再复制数组。
+export const FINDING_STATUSES: FindingStatus[] = Object.keys(finding) as FindingStatus[];
 
 const engine: Record<string, StatusMeta> = {
   exploring: { label: "探索中", tone: "blue" },
@@ -125,5 +132,8 @@ const maps = {
 export type StatusDomain = keyof typeof maps;
 
 export function statusMeta(domain: StatusDomain, key: string): StatusMeta {
-  return maps[domain][key] ?? { label: key, tone: "neutral" };
+  // finding map 钉了 FindingStatus 键类型（防 types.ts 加状态漏配色），这里按
+  // string 索引取值——未知键走 fallback 展示原文。
+  const table = maps[domain] as Record<string, StatusMeta>;
+  return table[key] ?? { label: key, tone: "neutral" };
 }

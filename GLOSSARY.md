@@ -21,9 +21,17 @@ _Avoid_: 关联、引用、挂载
 _Avoid_: baseline、proof、verification、supporting（正文中）
 
 **交付报告（deliverable report）**:
-按固定十节骨架渲染的 Markdown，只收已确认漏洞，不含任务元信息与过程说明；每个漏洞块自足、可单独交给复现方。
+按报告骨架渲染的 Markdown，只收已确认漏洞，不含任务元信息与过程说明；每个漏洞块自足、可单独交给复现方。
 _Avoid_: 汇总报告、工作记录、任务报告（指代正文时）
 
 **报告分节（report sections）**:
 `finding_report_sections` 中的描述、危害、修复建议、会话四段正文，与一条发现一一对应；与工作摘要 `summary` 分开书写。
 _Avoid_: 摘要、详细报告、report 字段
+
+**提交稿（submission draft）**:
+reporter 在漏洞登记后撰写的单漏洞交付全文，按报告骨架组织并通过骨架校验；与渲染层组装的交付报告、worker 上报的报告分节相区分。
+_Avoid_: 详细报告、report 字段、报告全文
+
+**报告骨架（report skeleton）**:
+提交稿与交付报告共用的固定十节章节顺序：漏洞名称、漏洞等级、漏洞类型、漏洞影响资产、漏洞URL、漏洞描述、〔测试账号与会话上下文〕、漏洞复现步骤（POC）、漏洞危害、修复建议；提交稿缺必需节会被拒绝入库。
+_Avoid_: 模板、章节模板、五节结构

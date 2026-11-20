@@ -49,7 +49,11 @@ func (s *Server) seedFindingReportFields() {
 	}
 	schema["required"] = required
 
-	raw, _ := json.Marshal(schema)
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		log.Printf("[report] upgrade report_finding schema: %v", err)
+		return
+	}
 	result, err := s.m.pg.Exec(`UPDATE tools SET schema=$2,updated_at=now() WHERE key=$1 AND system AND schema=$3`, "report_finding", string(raw), string(row.Schema))
 	if err != nil {
 		log.Printf("[report] upgrade report_finding schema: %v", err)

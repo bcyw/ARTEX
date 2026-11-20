@@ -24,7 +24,7 @@ func TestRetestConsecutiveInconclusive(t *testing.T) {
 
 	out, err := es.RecordFinding(context.Background(), RecordFindingInput{
 		ExplorationID: expID,
-		VulnClass:    "sqli", Severity: "high",
+		VulnClass:     "sqli", Severity: "high",
 		Summary: "注入", Evidence: "poc", Worker: "worker",
 	})
 	if err != nil {

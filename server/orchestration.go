@@ -442,10 +442,10 @@ func (s *Server) toolGetTaskNodeDetail() actool.CoreTool {
 // task-agnostic, so this host tool needs no task_id / exploration store.
 func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 	return wrTool("update_finding_report",
-		"为已登记的漏洞写入/更新【详细报告】(Markdown 全文,整段覆盖旧内容)。finding_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。报告建议包含:漏洞概述、影响与危害、复现步骤、证据/PoC、修复建议。",
+		"为已登记的漏洞写入/更新【详细报告】(Markdown 全文,整段覆盖旧内容)。finding_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。报告结构必须严格按你系统提示词中的十节骨架撰写,必须包含 ## 漏洞名称、## 漏洞复现步骤（POC）、## 漏洞危害、## 修复建议 四节(标题行逐字一致、独立成行),缺节或超 300 行会被拒绝入库。全文建议 ≤120 行：证据靠关联流量与关键片段承载,不整段倾倒报文原文。",
 		objSchema(map[string]any{
 			"finding_id":       map[string]any{"type": "integer", "description": "目标漏洞 id(report_finding 返回的 id)"},
-			"report":           strParam("详细报告全文,Markdown 格式"),
+			"report":           strParam("详细报告全文,Markdown 格式,按系统提示词十节骨架,建议 ≤120 行"),
 			"evidence_version": map[string]any{"type": "integer", "description": "get_finding_traffic 返回的证据 version；用于防止报告覆盖新的证据变更"},
 		}, "finding_id", "report"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
@@ -458,6 +458,9 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			nodeID := parseProfileID(a.FindingID) // 复用「数字或数字字符串」解析
 			if nodeID <= 0 {
 				return actool.Errorf("finding_id 无效"), nil
+			}
+			if err := validateFindingReport(a.Report); err != nil {
+				return actool.Errorf(err.Error()), nil
 			}
 			n, err := s.m.pg.SetFindingReportVersionByNodeID(ctx, nodeID, a.Report, a.EvidenceVersion)
 			if err != nil {
@@ -519,7 +522,8 @@ func (s *Server) seedOrchestrationTools() {
 	s.reseedPentestPrompt()           // pentest 提示词:SRC 挖掘导向(路线按可收性排序+走透=实际危害)(一次性)
 	s.seedReporterAgent()             // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
 	s.upgradeReporterTriggerMessage() // 老库补迁移:让 reporter 回传 evidence_version(一次性)
-	s.reseedReporterPrompt()         // reporter 提示词重写为 SRC 提交稿标准(一次性)
+	s.upgradeReporterTriggerMessageV2() // 老库补迁移:触发消息补报告骨架提醒(一次性)
+	s.reseedReporterPrompt()          // reporter 提示词重写为 SRC 提交稿标准(一次性)
 	s.seedFindingTrafficTools()       // 增加可选证据参数及只读证据工具，保留用户配置
 	s.seedFindingReportFields()       // report_finding 增加交付报告分节字段(description/impact/remediation/session)
 	s.seedFindingWorkflowTools()
@@ -534,7 +538,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v7_list_facts_paging"
+	const flag = "tool_schema_refresh_v8_report_skeleton"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -583,155 +587,68 @@ func (s *Server) unbindGoalMetDefault() {
 	_ = s.m.pg.SetSetting(flag, "true")
 }
 
-// reseedGoalsPrompt 把 goals 目标拆解器的提示词刷成【当前代码默认】——因为默认正文新增了
-// 「先抽操作约束(set_constraints)再拆目标」这一步,而 SeedPromptIfEmpty 首插入only,旧库
-// 已有的 version 1 收不到这步。这里用版本管理【追加一个新版本】并切过去(ResetPromptToDefault),
-// 旧的版本仍保留在历史里,用户若自定义过可从版本记录找回。settings flag 守卫 → 只做一次;
-// 以后默认再变就 bump 这个 flag。全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。
-func (s *Server) reseedGoalsPrompt() {
-	const flag = "goals_prompt_src_mining_v2"
+// reseedPromptToDefault 是各 reseedXxxPrompt 的共享实现：把指定 agent 的提示词
+// 刷成【当前代码默认】。SeedPromptIfEmpty 首插入 only，旧库已有的版本收不到代码
+// 默认的后续变更，故用版本管理【追加一个新版本】并切过去(ResetPromptToDefault)，
+// 旧版本仍保留在历史里，用户若自定义过可从版本记录找回。settings flag 守卫 →
+// 只做一次，以后默认再变就 bump 各自的 flag；无论成功与否只尝试一次。全新库
+// 无需处理：尚未建 agent 行时由 seedPrompts/seedXxx 直接 seed 最新默认；当前
+// 版本已等于代码默认时短路，不追加重复版本。
+func (s *Server) reseedPromptToDefault(agentKey, flag, tmpl, doneNote string) {
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
 	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
-	a, err := s.m.pg.GetAgentByKey("goals")
+	a, err := s.m.pg.GetAgentByKey(agentKey)
 	if err != nil || a == nil {
-		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
+		return // 全新库尚未建 agent 行(或用户删过该 agent)时,seed 会直接 seed 最新默认,无需此迁移
 	}
-	tmpl := agent.BuiltinPromptSeeds()["goals"]
 	if tmpl == "" {
 		return
 	}
-	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
+	// 全新库已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
 	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
 		return
 	}
 	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
-		log.Printf("[prompts] goals 提示词重刷为新默认失败: %v", err)
+		log.Printf("[prompts] %s 提示词重刷为新默认失败: %v", agentKey, err)
 		return
 	}
-	log.Printf("[prompts] goals 提示词已追加新默认版本(加入抽操作约束步,一次性)")
+	log.Printf("[prompts] %s 提示词已追加新默认版本(%s,一次性)", agentKey, doneNote)
+}
+
+// reseedGoalsPrompt 把 goals 目标拆解器的提示词刷成【当前代码默认】——默认正文新增了
+// 「先抽操作约束(set_constraints)再拆目标」这一步。以后默认再变就 bump flag。
+func (s *Server) reseedGoalsPrompt() {
+	s.reseedPromptToDefault("goals", "goals_prompt_src_mining_v2", agent.BuiltinPromptSeeds()["goals"], "加入抽操作约束步")
 }
 
 // reseedMainAgentPrompt 把 mainagent 提示词刷成【当前代码默认】——默认正文新增了「目标全部
-// 达成后 add_intent 直投意图时,反问人是否登记为正式目标」这段引导,而 SeedPromptIfEmpty 首插入
-// only,旧库已有版本收不到。用版本管理【追加一个新版本】并切过去(ResetPromptToDefault),旧版本仍
-// 保留在历史里,用户若自定义过可从版本记录找回。settings flag 守卫 → 只做一次。全新库无需处理
-// (SeedPromptIfEmpty 已 seed 最新默认)。与 reseedGoalsPrompt 完全同构。
+// 达成后 add_intent 直投意图时,反问人是否登记为正式目标」这段引导。以后默认再变就 bump flag。
 func (s *Server) reseedMainAgentPrompt() {
-	const flag = "mainagent_prompt_src_mining_v2"
-	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
-		return
-	}
-	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
-	a, err := s.m.pg.GetAgentByKey("mainagent")
-	if err != nil || a == nil {
-		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
-	}
-	tmpl := agent.BuiltinPromptSeeds()["mainagent"]
-	if tmpl == "" {
-		return
-	}
-	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
-	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
-		return
-	}
-	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
-		log.Printf("[prompts] mainagent 提示词重刷为新默认失败: %v", err)
-		return
-	}
-	log.Printf("[prompts] mainagent 提示词已追加新默认版本(加入目标达成后反问建目标,一次性)")
+	s.reseedPromptToDefault("mainagent", "mainagent_prompt_src_mining_v2", agent.BuiltinPromptSeeds()["mainagent"], "加入目标达成后反问建目标")
 }
 
-// reseedPlannerPrompt 把 planner 提示词刷成【当前代码默认】——默认正文做了精简重构,并把「克制」降级为
-// 仅去重、新增「深度优先于覆盖度」「硬底线:目标未达成且无在跑意图必须产出」、给否定结论复核加上界。
-// 每次默认有实质变更就 bump 下面的 flag(当前 v2)让存量旧库再刷一次。SeedPromptIfEmpty 首插入only,旧库已有版本收不到,故用版本管理
-// 【追加一个新版本】并切过去(ResetPromptToDefault),旧版本仍保留在历史里,用户若自定义过可从版本记录
-// 找回。settings flag 守卫 → 只做一次。全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。与
-// reseedGoalsPrompt 完全同构。
+// reseedPlannerPrompt 把 planner 提示词刷成【当前代码默认】——默认正文做了精简重构,并把
+// 「克制」降级为仅去重、新增「深度优先于覆盖度」「硬底线:目标未达成且无在跑意图必须产出」、
+// 给否定结论复核加上界。以后默认再变就 bump flag。
 func (s *Server) reseedPlannerPrompt() {
-	const flag = "planner_prompt_src_mining_v3"
-	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
-		return
-	}
-	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
-	a, err := s.m.pg.GetAgentByKey("planner")
-	if err != nil || a == nil {
-		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
-	}
-	tmpl := agent.BuiltinPromptSeeds()["planner"]
-	if tmpl == "" {
-		return
-	}
-	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
-	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
-		return
-	}
-	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
-		log.Printf("[prompts] planner 提示词重刷为新默认失败: %v", err)
-		return
-	}
-	log.Printf("[prompts] planner 提示词已追加新默认版本(精简重构+克制降级去重+深度优先+否定复核上界,一次性)")
+	s.reseedPromptToDefault("planner", "planner_prompt_src_mining_v3", agent.BuiltinPromptSeeds()["planner"], "精简重构+克制降级去重+深度优先+否定复核上界")
 }
 
-// reseedWorkerPrompt 把 worker 提示词刷成【当前代码默认】——默认正文 record_fact 段删掉了「否定类结论
-// 写观察+试探性读法」整句、并把 confidence(observed/inferred)与「是否穷尽本意图手段」解耦(这些易误导规划者),
-// 同时把 facts 数组分条收紧为「彼此完全独立、无法归并」的极少数例外。bump flag 至 v3 让存量旧库再刷一次。
-// SeedPromptIfEmpty 首插入only,旧库已有版本收不到,故用版本管理【追加一个新版本】并切过去,旧版本仍保留在历史里可找回。
-// settings flag 守卫 → 只做一次。全新库无需处理。与 reseedGoalsPrompt 完全同构。
+// reseedWorkerPrompt 把 worker 提示词刷成【当前代码默认】——默认正文 record_fact 段删掉了
+// 「否定类结论写观察+试探性读法」整句、并把 confidence(observed/inferred)与「是否穷尽本意图
+// 手段」解耦(这些易误导规划者),同时把 facts 数组分条收紧为「彼此完全独立、无法归并」的极少数
+// 例外。以后默认再变就 bump flag。
 func (s *Server) reseedWorkerPrompt() {
-	const flag = "worker_prompt_src_mining_v5"
-	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
-		return
-	}
-	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
-	a, err := s.m.pg.GetAgentByKey("worker")
-	if err != nil || a == nil {
-		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
-	}
-	tmpl := agent.BuiltinPromptSeeds()["worker"]
-	if tmpl == "" {
-		return
-	}
-	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
-	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
-		return
-	}
-	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
-		log.Printf("[prompts] worker 提示词重刷为新默认失败: %v", err)
-		return
-	}
-	log.Printf("[prompts] worker 提示词已追加新默认版本(查上下文段收敛为 list_assets/list_findings,去掉 list_facts/node_detail/asset_neighbors,一次性)")
+	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v5", agent.BuiltinPromptSeeds()["worker"], "查上下文段收敛为 list_assets/list_findings,去掉 list_facts/node_detail/asset_neighbors")
 }
 
 // reseedPentestPrompt 把 pentest 提示词刷成【当前代码默认】——默认正文加入 SRC 挖掘导向:
 // 路线组合按 SRC 可收性排序(业务逻辑面优先级不低于注入类)、走透=挖到实际危害、
-// 判定达成以实际危害证据为准。SeedPromptIfEmpty 首插入only,旧库已有版本收不到,故用版本管理
-// 【追加一个新版本】并切过去,旧版本仍保留在历史里可找回。settings flag 守卫 → 只做一次;
-// 全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。与 reseedGoalsPrompt 完全同构。
+// 判定达成以实际危害证据为准。以后默认再变就 bump flag。
 func (s *Server) reseedPentestPrompt() {
-	const flag = "pentest_prompt_src_mining_v1"
-	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
-		return
-	}
-	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
-	a, err := s.m.pg.GetAgentByKey("pentest")
-	if err != nil || a == nil {
-		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
-	}
-	tmpl := agent.BuiltinPromptSeeds()["pentest"]
-	if tmpl == "" {
-		return
-	}
-	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
-	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
-		return
-	}
-	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
-		log.Printf("[prompts] pentest 提示词重刷为新默认失败: %v", err)
-		return
-	}
-	log.Printf("[prompts] pentest 提示词已追加新默认版本(SRC 挖掘导向,一次性)")
+	s.reseedPromptToDefault("pentest", "pentest_prompt_src_mining_v1", agent.BuiltinPromptSeeds()["pentest"], "SRC 挖掘导向")
 }
 
 // reporterToolCallMessage 必须无条件要求先读一次 get_finding_traffic 再写报告。
@@ -740,6 +657,14 @@ func (s *Server) reseedPentestPrompt() {
 // SetFindingReportVersionByNodeID 便按 legacy 语义写 -1,漏洞详情与 Markdown 导出
 // 从此常驻「证据已变更，报告待更新」,而 UI 上没有任何入口能把它清掉。
 const reporterToolCallMessage = "上面刚有一个漏洞被 report_finding 登记。请读取返回 JSON 的 finding_id（独立漏洞记录 ID）与 finding_node_id（探索节点 ID），" +
+	"先用 get_finding_traffic(finding_id) 读取当前证据清单及其 version（空清单是正常情况，照常写报告）；" +
+	"若运行指引启用自动绑定，在读取前先核实并关联本次漏洞的流量。节点详情使用 finding_node_id。" +
+	"最后调用 update_finding_report(finding_id=finding_node_id, report, evidence_version=实际读取版本) 保存，" +
+	"evidence_version 必须传，否则报告会被永久标记为待更新。" +
+	"报告结构必须严格按你系统提示词中的十节骨架撰写，缺必需章节（## 漏洞名称 / ## 漏洞复现步骤（POC） / ## 漏洞危害 / ## 修复建议）会被拒绝保存。不要混用两种编号。"
+
+// 旧版触发消息(0.3.9，evidence_version 版)。只有仍与它逐字相同的记录才会被迁移覆盖，用户改过的保持原样。
+const reporterToolCallMessageV2 = "上面刚有一个漏洞被 report_finding 登记。请读取返回 JSON 的 finding_id（独立漏洞记录 ID）与 finding_node_id（探索节点 ID），" +
 	"先用 get_finding_traffic(finding_id) 读取当前证据清单及其 version（空清单是正常情况，照常写报告）；" +
 	"若运行指引启用自动绑定，在读取前先核实并关联本次漏洞的流量。节点详情使用 finding_node_id。" +
 	"最后调用 update_finding_report(finding_id=finding_node_id, report, evidence_version=实际读取版本) 保存，" +
@@ -778,29 +703,40 @@ func (s *Server) upgradeReporterTriggerMessage() {
 	}
 }
 
-// reseedReporterPrompt 把 reporter 提示词刷成【当前代码默认】——默认正文按 SRC 提交稿
-// 标准重写(首屏判决/原始报文 PoC/证据密度/去 AI 腔)。SeedPromptIfEmpty 首插入only,旧库
-// 已有版本收不到,故用版本管理【追加一个新版本】并切过去,旧版本仍保留在历史里可找回。
-// settings flag 守卫 → 只做一次;全新库无需处理。与 reseedGoalsPrompt 完全同构。
-func (s *Server) reseedReporterPrompt() {
-	const flag = "reporter_prompt_src_submission_v1"
+// upgradeReporterTriggerMessageV2 把老库里仍是 evidence_version 版默认文案的 reporter
+// 触发消息刷成带报告骨架提醒的新版本——update_finding_report 开始做骨架硬校验后,
+// 触发消息需要提前告知结构要求,避免 agent 到保存一步才被打回。一次性,且只覆盖
+// 未被用户改动的文案。
+func (s *Server) upgradeReporterTriggerMessageV2() {
+	const flag = "reporter_trigger_report_skeleton_v1"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
-	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
-	a, err := s.m.pg.GetAgentByKey("reporter")
-	if err != nil || a == nil {
-		return // 用户删过 reporter 或全新库——seedReporterAgent/无此 agent,无需迁移
-	}
-	// 全新库 seedReporterAgent 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
-	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == agent.ReporterDefaultPrompt {
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 只尝试一次
+	triggers, err := s.m.pg.ListTriggersFor("reporter")
+	if err != nil {
+		log.Printf("[reporter] 读取触发器失败: %v", err)
 		return
 	}
-	if _, err := s.m.pg.ResetPromptToDefault(a.ID, agent.ReporterDefaultPrompt); err != nil {
-		log.Printf("[prompts] reporter 提示词重刷为新默认失败: %v", err)
-		return
+	for _, t := range triggers {
+		if !t.OnToolCall || t.ToolCallMessage != reporterToolCallMessageV2 {
+			continue // 用户改过或不是 finding 触发器，不动。
+		}
+		t.ToolCallMessage = reporterToolCallMessage
+		if err := s.m.pg.UpdateTrigger(t); err != nil {
+			log.Printf("[reporter] 升级触发消息失败: %v", err)
+			return
+		}
+		log.Printf("[reporter] 触发消息已补充报告骨架提醒")
 	}
-	log.Printf("[prompts] reporter 提示词已追加新默认版本(SRC 提交稿标准,一次性)")
+}
+
+// reseedReporterPrompt 把 reporter 提示词刷成【当前代码默认】——默认正文按 SRC 提交稿
+// 标准重写(首屏判决/原始报文 PoC/证据密度/去 AI 腔)，v2 又做了报告瘦身：描述 ≤200 字、
+// 删「自写叙述行数≤引用原文行数」反向激励、危害节禁重复复现报文、PoC 改 Step 式、
+// 测试账号节加凭据相关性规则(复现不依赖登录态就整节省略)。以后默认再变就 bump flag。
+func (s *Server) reseedReporterPrompt() {
+	s.reseedPromptToDefault("reporter", "reporter_prompt_concise_v2", agent.ReporterDefaultPrompt, "报告瘦身:描述≤200字+凭据相关性+危害禁重复复现")
 }
 
 // seedReporterAgent 预置一个「报告撰写」自定义 agent(builtin=false，可在 UI 编辑/删除)：

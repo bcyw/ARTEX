@@ -54,7 +54,6 @@ import { cn } from "@/lib/utils";
 
 import { AssetTree, assetPathOf } from "./_components/asset-tree";
 import {
-  FINDING_STATUSES,
   type FindingEdit,
   type FindingReport,
   FindingsTable,
@@ -64,6 +63,7 @@ import {
   SEVERITIES,
   UNASSIGNED_TASK,
 } from "./_components/findings-table";
+import { FINDING_STATUSES } from "@/lib/status";
 
 const FINDING_LIST_PREFERENCE_KEY = "artex_finding_list_preferences";
 

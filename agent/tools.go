@@ -1241,11 +1241,11 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。description / impact / remediation 按交付报告文体填写：直接描述功能与根因、已验证的影响、可执行的修复，不写工具名、检索过程或“未绑定流量”之类的过程说明。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
 		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要（工作记录，不是报告正文）"),
 		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
-		"evidence":         str("证据/PoC 文本"),
-		"description":      str("漏洞描述（交付文体）：功能如何工作、根因、攻击者能做什么；写已验证事实，不写过程旁白"),
+		"evidence":         str("证据/PoC 文本：精选最能证明漏洞的关键片段（≤20 行），完整请求/响应报文应通过 traffic_refs 绑定流量记录，不在 evidence 里整段倾倒"),
+		"description":      str("漏洞描述（交付文体）：功能如何工作、根因、攻击者能做什么；写已验证事实，不写过程旁白；全文 ≤200 字"),
 		"impact":           str("漏洞危害（交付文体）：已验证的数据/权限影响，分条量化"),
 		"remediation":      str("修复建议（交付文体）：可执行的参数级修复，分条"),
-		"session":          str("可选：测试账号与会话上下文（角色、账号标识、复验用 Cookie/token、账号来源、隔离方式）"),
+		"session":          str("可选：测试账号与会话上下文。凭据相关性规则：复现依赖登录态/特定账号时才写账号与凭据（角色、账号标识、复验用 Cookie/token、账号来源、隔离方式）；漏洞本身未登录即可复现且与凭据无关时，整段省略，不写无关账号密码"),
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
 			"items": obj(map[string]any{"traffic_id": str("traffic_search 返回的真实流量 ID"), "role": map[string]any{"type": "string", "enum": []string{"baseline", "proof", "verification", "supporting"}}, "note": str("该流量如何支持漏洞结论")}, "traffic_id")},
@@ -1276,7 +1276,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		// 也要保留意图与资产关联，人工放行后信息完整），blocked 只改 Quarantine 标记。
 		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs),
 			Description: a.Description, Impact: a.Impact, Remediation: a.Remediation, Session: a.Session}
-		if blocked, reason := SrcFindingBlocked(a.VulnClass, a.Name, a.Summary, a.Evidence, a.Description); blocked {
+		if blocked, reason := SrcFindingBlocked(SrcFindingTexts{VulnClass: a.VulnClass, Name: a.Name, Summary: a.Summary, Evidence: a.Evidence, Description: a.Description}); blocked {
 			input.Quarantine = true
 			q, err := t.ts.RecordFinding(ctx, input)
 			if err != nil {
@@ -1284,9 +1284,9 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			}
 			t.writes.Findings++
 			raw, _ := json.Marshal(map[string]any{
-				"finding_id":       strconv.FormatInt(q.FindingID, 10),
-				"finding_node_id":  strconv.FormatInt(q.NodeID, 10),
-				"evidence_status":  "quarantined",
+				"finding_id":        strconv.FormatInt(q.FindingID, 10),
+				"finding_node_id":   strconv.FormatInt(q.NodeID, 10),
+				"evidence_status":   "quarantined",
 				"quarantine_reason": reason,
 				"note":              "命中 SRC 收取黑名单（" + reason + "）。指纹/端口/版本披露、点击劫持属一票否决，无论证据一律不收；其余黑名单类型如确有升级条件对应的真实危害证据，在 summary 中写明「升级证据：…」并附实际响应证据后重新上报；否则请改用 record_fact 记 inferred 事实。",
 			})

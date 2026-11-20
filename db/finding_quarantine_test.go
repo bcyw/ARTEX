@@ -23,7 +23,7 @@ func TestRecordFindingQuarantine(t *testing.T) {
 
 	in := RecordFindingInput{
 		ExplorationID: expID,
-		VulnClass:    "clickjacking", Severity: "low",
+		VulnClass:     "clickjacking", Severity: "low",
 		Summary: "点击劫持", Evidence: "poc", Worker: "worker",
 		Quarantine: true,
 	}

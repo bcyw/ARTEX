@@ -23,8 +23,8 @@ Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents
 
 ## Repo identity — do not "fix" these
 
-- Go module is `github.com/Autumn-27/artex` even though the maintained repo is `jaykwok/ARTEX`; imports intentionally keep the old path.
-- In-page self-update is hardcoded to `jaykwok/ARTEX` in `selfupdate/github.go`. Change it only deliberately.
+- Go module is `github.com/Autumn-27/artex` even though the maintained repo is `bcyw/ARTEX`; imports intentionally keep the old path.
+- In-page self-update is hardcoded to `bcyw/ARTEX` in `selfupdate/github.go`. Change it only deliberately.
 - This is a self-maintained v1.x fork with a fresh SQLite schema; there is no PostgreSQL data/config migration path.
 
 ## Toolchain

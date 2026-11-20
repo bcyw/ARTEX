@@ -76,13 +76,20 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 		if s := strings.TrimSpace(f.Summary); s != "" {
 			fmt.Fprintf(&b, "%s\n\n", s)
 		}
-		if e := strings.TrimSpace(f.Evidence); e != "" {
-			fmt.Fprintf(&b, "**证据：**\n\n```\n%s\n```\n\n", e)
-		}
 		if rep := strings.TrimSpace(f.Report); rep != "" {
+			// 有详细报告时证据不再全文倾倒(报告内已含 PoC 与证据引用),只留指针,
+			// 避免同一段报文在导出里重复出现。
+			if e := strings.TrimSpace(f.Evidence); e != "" {
+				fmt.Fprintf(&b, "**证据**：见详细报告与关联流量证据(完整原始证据存于漏洞记录)。\n\n")
+			}
 			b.WriteString("**详细报告：**\n\n")
 			b.WriteString(rep)
 			b.WriteString("\n\n")
+		} else {
+			// 无报告时保留全文证据,否则导出会丢失全部 PoC 内容。
+			if e := strings.TrimSpace(f.Evidence); e != "" {
+				fmt.Fprintf(&b, "**证据：**\n\n```\n%s\n```\n\n", e)
+			}
 		}
 		b.WriteString(findingTrafficMarkdown(f, false))
 		b.WriteString("---\n\n")
@@ -107,13 +114,17 @@ func SingleFindingMarkdown(f *db.DBFinding, generatedAt time.Time) string {
 	if s := strings.TrimSpace(f.Summary); s != "" {
 		fmt.Fprintf(&b, "## 概述\n\n%s\n\n", s)
 	}
-	if e := strings.TrimSpace(f.Evidence); e != "" {
-		fmt.Fprintf(&b, "## 证据\n\n```\n%s\n```\n\n", e)
-	}
 	if rep := strings.TrimSpace(f.Report); rep != "" {
+		if e := strings.TrimSpace(f.Evidence); e != "" {
+			b.WriteString("## 证据\n\n见详细报告与关联流量证据(完整原始证据存于漏洞记录)。\n\n")
+		}
 		b.WriteString("## 详细报告\n\n")
 		b.WriteString(rep)
 		b.WriteString("\n")
+	} else {
+		if e := strings.TrimSpace(f.Evidence); e != "" {
+			fmt.Fprintf(&b, "## 证据\n\n```\n%s\n```\n\n", e)
+		}
 	}
 	b.WriteString(findingTrafficMarkdown(f, true))
 	return b.String()
@@ -175,19 +186,16 @@ func findingTrafficIDs(f *db.DBFinding) string {
 	return strings.Join(ids, ",")
 }
 
+// findingTrafficMarkdown 渲染提交稿后的关联流量证据清单。导出物是交付物(ADR 0003):
+// 不输出证据版本、绑定数量、报告待更新这类过程元数据,角色一律用中文名。
 func findingTrafficMarkdown(f *db.DBFinding, attachments bool) string {
-	stale := f.Report != "" && f.EvidenceVersion != f.ReportEvidenceVersion
-	if len(f.TrafficBindings) == 0 && !stale {
+	if len(f.TrafficBindings) == 0 {
 		return ""
 	}
 	var out strings.Builder
 	out.WriteString("\n## 关联流量证据\n\n")
-	fmt.Fprintf(&out, "证据版本：%d；绑定数量：%d。\n\n", f.EvidenceVersion, len(f.TrafficBindings))
-	if stale {
-		out.WriteString("证据已变更，详细报告待更新。\n\n")
-	}
 	for i, b := range f.TrafficBindings {
-		fmt.Fprintf(&out, "%d. **证据 #%d · %s** — `%s %s`，状态码 %d\n", i+1, b.ID, b.Role, b.Snapshot.Method, strings.ReplaceAll(b.Snapshot.URL, "`", "%60"), b.Snapshot.Status)
+		fmt.Fprintf(&out, "%d. **证据 #%d · %s** — `%s %s`，状态码 %d\n", i+1, b.ID, roleLabel(b.Role), b.Snapshot.Method, strings.ReplaceAll(b.Snapshot.URL, "`", "%60"), b.Snapshot.Status)
 		if b.Note != "" {
 			fmt.Fprintf(&out, "   %s\n", strings.ReplaceAll(b.Note, "\n", "\n   "))
 		}

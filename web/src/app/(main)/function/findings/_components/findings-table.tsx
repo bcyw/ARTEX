@@ -36,24 +36,11 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { statusMeta } from "@/lib/status";
+import { FINDING_STATUSES, statusMeta } from "@/lib/status";
 import type { ActiveFindingRetest, Finding, FindingStatus, Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
-
-export const FINDING_STATUSES: FindingStatus[] = [
-  "pending",
-  "in_progress",
-  "confirmed",
-  "resolved",
-  "fixed",
-  "false_positive",
-  "ignored",
-  "duplicate",
-  "risk_accepted",
-  "quarantined",
-];
 
 export const UNASSIGNED_TASK = "__unassigned__";
 

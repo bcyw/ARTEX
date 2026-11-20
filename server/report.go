@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -107,7 +106,7 @@ func reportAssets(store *db.AssetStore, ids []int64, steps []report.Step) []stri
 		}
 	}
 	for _, step := range steps {
-		add(hostOfURL(step.URL))
+		add(report.HostOf(step.URL))
 	}
 	return out
 }
@@ -121,7 +120,7 @@ func reportAssetLabel(a *db.Asset) string {
 	case a.IP != "":
 		return hostPort(a.IP, a.Port)
 	case a.URL != "":
-		return hostOfURL(a.URL)
+		return report.HostOf(a.URL)
 	case a.AppName != "":
 		return a.AppName
 	case a.BundleID != "":
@@ -137,21 +136,19 @@ func hostPort(host string, port *int) string {
 	return host
 }
 
-func hostOfURL(raw string) string {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return ""
-	}
-	return u.Host
-}
-
 func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 	t := s.m.ResolveTask(r.URL.Query().Get("task"))
 	if t == nil {
 		writeErr(w, 404, "no active task")
 		return
 	}
-	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	taskID, err := strconv.ParseInt(t.ID, 10, 64)
+	if err != nil {
+		// 任务 ID 一律是数字；解析失败说明 ResolveTask 命中了非任务别名，宁可
+		// 明确报错也不渲染一份空报告让人误以为任务没有发现。
+		writeErr(w, 404, "task not found")
+		return
+	}
 	in, err := s.taskReportInput(r.Context(), taskID)
 	if err != nil {
 		writeErr(w, 500, "读取报告数据失败")

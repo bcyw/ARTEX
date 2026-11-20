@@ -8,11 +8,13 @@ import (
 
 func TestSrcFindingBlocked(t *testing.T) {
 	cases := []struct {
-		desc                          string
-		vulnclass, name, summary      string
-		evidence, description         string
-		wantBlocked                   bool
-		wantReasonNonEmpty            bool
+		desc               string
+		vulnclass, name    string
+		summary            string
+		evidence           string
+		description        string
+		wantBlocked        bool
+		wantReasonNonEmpty bool
 	}{
 		{"正常SQL注入", "sqli", "SQL注入", "union查询返回用户数据", "响应包含用户表数据", "", false, false},
 		{"正常越权", "idor", "水平越权", "展示了其他账户的订单", "", "", false, false},
@@ -34,10 +36,41 @@ func TestSrcFindingBlocked(t *testing.T) {
 		{"升级证据放行", "weak_password", "", "升级证据：高权账户可横向影响", "", "", false, false},
 		{"升级证据写在evidence也放行", "weak_password", "", "疑似默认口令", "升级证据：登录的是管理员账户并拿到后台权限", "", false, false},
 		{"无升级证据字样不放行", "weak_password", "", "这个真的危害很大", "", "", true, true},
+		// 否定句不算升级证据:「无升级证据」包含字面标记,不能放行。
+		{"无升级证据否定句不放行", "weak_password", "", "无升级证据,但危害很大", "", "", true, true},
+		{"未提供升级证据不放行", "weak_password", "", "未提供升级证据", "", "", true, true},
+		// 一票否决关键词只扫声明字段:evidence 里上下文性提及不拦截。
+		{"证据里排除点击劫持不误杀", "idor", "水平越权", "展示了他人订单", "已排除点击劫持可能", "", false, false},
+		{"证据里提及指纹不误杀", "sqli", "SQL注入", "注出库名", "响应中的指纹识别特征仅用于定位版本", "", false, false},
+		// #1 反射 XSS(无敏感操作)与 #2 低危 CSRF。
+		{"反射XSS拦截", "reflected_xss", "反射XSS", "搜索参数回显可弹窗", "", "", true, true},
+		{"反射型XSS中文类名拦截", "反射型XSS", "", "", "", "", true, true},
+		{"CSRF类名拦截", "csrf", "CSRF改资料", "", "", "", true, true},
+		{"跨站请求伪造关键词拦截", "other", "跨站请求伪造", "可修改个人昵称", "", "", true, true},
+		{"CSRF触达敏感操作升级放行", "csrf", "CSRF改绑手机", "升级证据：可触达改绑手机号操作", "", "", false, false},
+		// #4 信息泄露具体形态。
+		{"目录列表拦截", "directory_listing", "目录列表", "", "", "", true, true},
+		{"git泄露拦截", "other", ".git泄露", "仓库目录可下载", "", "", true, true},
+		{"phpinfo拦截", "phpinfo", "", "", "", "", true, true},
+		{"源码泄露升级放行", "source_leak", "源码泄露", "升级证据：从泄露源码还原出注入点并实际利用", "", "", false, false},
+		// #6/#7/#10 只拦显式自称理论/无回显的形态;已证实的不拦。
+		{"理论IDOR拦截", "idor", "理论IDOR", "推测存在越权", "", "", true, true},
+		{"疑似越权拦截", "other", "疑似越权", "未验证他人数据", "", "", true, true},
+		{"已证实越权不拦", "idor", "水平越权", "B的token读到A的订单且内容一致", "", "", false, false},
+		{"无回显SSRF拦截", "ssrf", "无回显SSRF", "仅DNSlog出网", "", "", true, true},
+		{"仅DNSlog拦截", "ssrf", "SSRF", "仅dnslog验证出网", "", "", true, true},
+		{"回显SSRF不拦", "ssrf", "SSRF读到内网元数据", "返回云元数据含凭据", "", "", false, false},
+		{"可能存在未授权拦截", "other", "可能存在未授权", "接口疑似未授权", "", "", true, true},
+		// 连写归一:下划线/空格/连字符写法同形匹配。
+		{"用户名枚举空格英文拦截", "other", "Username Enumeration", "响应差异可枚举", "", "", true, true},
+		{"反射XSS连字符拦截", "other", "Reflected-XSS", "", "", "", true, true},
 	}
 	for _, c := range cases {
 		t.Run(c.desc, func(t *testing.T) {
-			blocked, reason := SrcFindingBlocked(c.vulnclass, c.name, c.summary, c.evidence, c.description)
+			blocked, reason := SrcFindingBlocked(SrcFindingTexts{
+				VulnClass: c.vulnclass, Name: c.name, Summary: c.summary,
+				Evidence: c.evidence, Description: c.description,
+			})
 			if blocked != c.wantBlocked {
 				t.Fatalf("blocked = %v, want %v (reason=%q)", blocked, c.wantBlocked, reason)
 			}
@@ -56,8 +89,11 @@ func TestFindingGuidanceWithStandards(t *testing.T) {
 	if !strings.Contains(g, "黑名单") {
 		t.Fatal("guidance 缺少黑名单段")
 	}
-	if !strings.Contains(g, "拒绝入库") {
+	if !strings.Contains(g, "拦截进隔离区") {
 		t.Fatal("guidance 缺少硬闸行为说明")
+	}
+	if !strings.Contains(g, "复测纪律") {
+		t.Fatal("guidance 缺少复测纪律段")
 	}
 	if !strings.Contains(g, "中高危挖掘导向") {
 		t.Fatal("guidance 缺少中高危挖掘导向")

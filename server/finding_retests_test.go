@@ -286,6 +286,47 @@ func TestRetestFixedUpdatesFindingThroughConversation(t *testing.T) {
 	}
 }
 
+func TestRetestReseedPrompt(t *testing.T) {
+	s, _ := newRetestServer(t)
+	a, err := s.m.pg.GetAgentByKey(db.FindingRetestAgentKey)
+	if err != nil || a == nil {
+		t.Fatal("missing retester agent")
+	}
+	// 包内测试共享同一个 SQLite：先跑的其他测试可能已让完整 Server 启动路径
+	// 消费过 reseed flag。这里显式复位，保证本测试与执行顺序无关。
+	if err := s.m.pg.SetSetting("retester_prompt_src_acceptance_v1", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an old DB: replace the prompt with a stale version.
+	if _, err := s.m.pg.SavePrompt(a.ID, "STALE PROMPT v1", "stale", "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// First call should reseed to the current code default.
+	s.reseedRetesterPrompt()
+	cur, err := s.m.pg.CurrentPrompt(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur != agent.RetesterDefaultPrompt {
+		t.Fatalf("after reseed: got %q, want RetesterDefaultPrompt", cur)
+	}
+
+	// Simulate user customization after reseed.
+	if _, err := s.m.pg.SavePrompt(a.ID, "USER CUSTOM PROMPT", "user edit", "test"); err != nil {
+		t.Fatal(err)
+	}
+	// Second call is a no-op (flag already set) — must not overwrite the user edit.
+	s.reseedRetesterPrompt()
+	cur, err = s.m.pg.CurrentPrompt(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur != "USER CUSTOM PROMPT" {
+		t.Fatalf("second reseed overwrote user prompt: got %q", cur)
+	}
+}
+
 func TestRetestValidationSeedingAndScope(t *testing.T) {
 	s, fid := newRetestServer(t)
 	for _, tc := range []struct {

@@ -16,8 +16,8 @@ type builtinTaskTemplate struct {
 
 var builtinTaskTemplates = []builtinTaskTemplate{
 	{
-		Category: "渗透测试",
-		Name:     "单域名全量渗透",
+		Category:    "渗透测试",
+		Name:        "单域名全量渗透",
 		Description: "目标：",
 		Goal: "对任务描述中给出的目标开展 SRC 漏洞挖掘，按以下节奏推进：先确认范围并枚举全部存活 Web 入口（含非 80/443 端口、" +
 			"JS 文件与页面中引用的接口）；对每个入口摸清功能面（参数、身份体系、业务动作）后逐漏洞类探测；对疑点更换 payload、" +
@@ -25,8 +25,8 @@ var builtinTaskTemplates = []builtinTaskTemplate{
 			"每个可发现接口都测到、主要漏洞面探尽，而非已发现漏洞或已测接口的数量。",
 	},
 	{
-		Category: "渗透测试",
-		Name:     "批量资产全量渗透",
+		Category:    "渗透测试",
+		Name:        "批量资产全量渗透",
 		Description: "清单：",
 		Goal: "对任务描述中给出的资产清单开展 SRC 漏洞挖掘。清单可能是粘贴文本或文件路径，是路径须先读取文件获得完整清单，" +
 			"并把清单内全部目标登记进测试范围。先做存活确认与价值分层，优先测试高价值目标（有登录、支付、API、管理面或敏感业务的资产）。" +
@@ -35,8 +35,8 @@ var builtinTaskTemplates = []builtinTaskTemplate{
 			"完成标准是清单内每个存活资产的每个可发现接口都测到、主要漏洞面探尽，而非已发现漏洞或已测资产的数量。",
 	},
 	{
-		Category: "资产梳理",
-		Name:     "资产梳理",
+		Category:    "资产梳理",
+		Name:        "资产梳理",
 		Description: "清单：",
 		Goal: "对任务描述中给出的资产清单完成资产梳理与攻击面测绘。清单可能是粘贴文本或文件路径，是路径须先读取文件获得完整清单。" +
 			"逐项确认存活状态；对每个存活资产做指纹识别与技术栈归类；发现的 Web 入口、端口服务、管理后台、API 接口、" +

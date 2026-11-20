@@ -22,24 +22,12 @@ import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import { statusMeta } from "@/lib/status";
+import { FINDING_STATUSES, statusMeta } from "@/lib/status";
 import type { Finding, FindingStatus, Severity } from "@/lib/types";
 
 import { FindingLineageView } from "./lineage";
 
 const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
-const FINDING_STATUSES: FindingStatus[] = [
-  "pending",
-  "in_progress",
-  "confirmed",
-  "resolved",
-  "fixed",
-  "false_positive",
-  "ignored",
-  "duplicate",
-  "risk_accepted",
-  "quarantined",
-];
 
 function fmtTime(ts: string) {
   return new Date(ts).toLocaleString("zh-CN");

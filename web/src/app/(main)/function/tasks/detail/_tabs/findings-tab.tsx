@@ -13,7 +13,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import { useStoredSortPreference } from "@/lib/sort-preference";
-import { statusMeta } from "@/lib/status";
+import { FINDING_STATUSES, statusMeta } from "@/lib/status";
 import type { Finding, FindingStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -27,19 +27,6 @@ function findingLabel(finding: Finding): string {
   if (finding.vulnclass?.trim()) return finding.vulnclass;
   return "未分类";
 }
-
-const FINDING_STATUSES: FindingStatus[] = [
-  "pending",
-  "in_progress",
-  "confirmed",
-  "resolved",
-  "fixed",
-  "false_positive",
-  "ignored",
-  "duplicate",
-  "risk_accepted",
-  "quarantined",
-];
 
 function Row({
   f,

@@ -2,6 +2,12 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [Unreleased]
+
+### 更新源
+
+- 一键更新源由 `jaykwok/ARTEX` 改为本仓库 `bcyw/ARTEX`，页面更新检查、下载地址及文档中的仓库链接同步调整。
+
 ## [1.0.5] - 2026-11-16
 
 ### 任务恢复与超时
