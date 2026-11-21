@@ -661,14 +661,17 @@ const reporterToolCallMessage = "上面刚有一个漏洞被 report_finding 登�
 	"若运行指引启用自动绑定，在读取前先核实并关联本次漏洞的流量。节点详情使用 finding_node_id。" +
 	"最后调用 update_finding_report(finding_id=finding_node_id, report, evidence_version=实际读取版本) 保存，" +
 	"evidence_version 必须传，否则报告会被永久标记为待更新。" +
-	"报告结构必须严格按你系统提示词中的十节骨架撰写，缺必需章节（## 漏洞名称 / ## 漏洞复现步骤（POC） / ## 漏洞危害 / ## 修复建议）会被拒绝保存。不要混用两种编号。"
+	"报告结构必须严格按你系统提示词中的十节骨架撰写，缺必需章节（## 漏洞名称 / ## 漏洞复现步骤（POC） / ## 漏洞危害 / ## 修复建议）会被拒绝保存。" +
+	"禁止现场重测：不要对目标发起新的网络请求或重新验证漏洞，运行预算有限，把时间全部花在写报告上；需要事实就用 get_task_node_detail 读取探索节点已记录的结论。" +
+	"正文不得出现内部工具名、worker 名、版本号等系统字段，改用面向读者的自然语言。不要混用两种编号。"
 
-// 旧版触发消息(0.3.9，evidence_version 版)。只有仍与它逐字相同的记录才会被迁移覆盖，用户改过的保持原样。
+// 旧版触发消息(骨架提醒版，无预算纪律)。只有仍与它逐字相同的记录才会被迁移覆盖，用户改过的保持原样。
 const reporterToolCallMessageV2 = "上面刚有一个漏洞被 report_finding 登记。请读取返回 JSON 的 finding_id（独立漏洞记录 ID）与 finding_node_id（探索节点 ID），" +
 	"先用 get_finding_traffic(finding_id) 读取当前证据清单及其 version（空清单是正常情况，照常写报告）；" +
 	"若运行指引启用自动绑定，在读取前先核实并关联本次漏洞的流量。节点详情使用 finding_node_id。" +
 	"最后调用 update_finding_report(finding_id=finding_node_id, report, evidence_version=实际读取版本) 保存，" +
-	"evidence_version 必须传，否则报告会被永久标记为待更新。不要混用两种编号。"
+	"evidence_version 必须传，否则报告会被永久标记为待更新。" +
+	"报告结构必须严格按你系统提示词中的十节骨架撰写，缺必需章节（## 漏洞名称 / ## 漏洞复现步骤（POC） / ## 漏洞危害 / ## 修复建议）会被拒绝保存。不要混用两种编号。"
 
 // 旧版触发消息(0.3.8 及更早)。只有仍与它逐字相同的记录才会被迁移覆盖，用户改过的保持原样。
 const reporterToolCallMessageV1 = "上面刚有一个漏洞被 report_finding 登记。请从触发上下文里取出 finding_id" +
@@ -704,11 +707,11 @@ func (s *Server) upgradeReporterTriggerMessage() {
 }
 
 // upgradeReporterTriggerMessageV2 把老库里仍是 evidence_version 版默认文案的 reporter
-// 触发消息刷成带报告骨架提醒的新版本——update_finding_report 开始做骨架硬校验后,
-// 触发消息需要提前告知结构要求,避免 agent 到保存一步才被打回。一次性,且只覆盖
-// 未被用户改动的文案。
+// 触发消息刷成最新版默认文案。每次默认文案变更（加骨架提醒、加预算纪律）就把
+// reporterToolCallMessageV2 指向上一版并 bump flag 版本号，保持「只覆盖未被用户
+// 改动的文案」语义。一次性迁移。
 func (s *Server) upgradeReporterTriggerMessageV2() {
-	const flag = "reporter_trigger_report_skeleton_v1"
+	const flag = "reporter_trigger_budget_discipline_v1"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -727,7 +730,7 @@ func (s *Server) upgradeReporterTriggerMessageV2() {
 			log.Printf("[reporter] 升级触发消息失败: %v", err)
 			return
 		}
-		log.Printf("[reporter] 触发消息已补充报告骨架提醒")
+		log.Printf("[reporter] 触发消息已升级为骨架提醒+预算纪律版")
 	}
 }
 

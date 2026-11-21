@@ -66,6 +66,29 @@ func TestUpdateFindingReportAcceptsSkeletonReport(t *testing.T) {
 	}
 }
 
+func TestUpdateFindingReportRejectsInternalVocabulary(t *testing.T) {
+	s, f, _ := trafficEvidenceServer(t)
+	ctx := context.Background()
+	tools, _, cleanup := agent.AugmentTools(ctx, "reporter", nil)
+	defer cleanup()
+	// 实测坏例(finding 4 首轮重写):骨架齐全但正文点名内部工具与过程元数据。
+	res := workflowCall(t, ctx, workflowTool(t, tools, "update_finding_report"),
+		map[string]any{"finding_id": f.NodeID, "report": compliantFindingReport +
+			"\n补充:get_finding_traffic 返回 bindings 为空、version=0,依据 worker#2 的原始请求还原。\n"}, true)
+	for _, p := range []string{"get_finding_traffic", "bindings", "worker#"} {
+		if !strings.Contains(res, p) {
+			t.Fatalf("rejection should name banned phrase %q: %s", p, res)
+		}
+	}
+	finding, err := s.m.pg.GetFinding(f.FindingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding.Report != "" {
+		t.Fatal("report with internal vocabulary must not be persisted")
+	}
+}
+
 func TestUpdateFindingReportRejectsOverlongReport(t *testing.T) {
 	_, f, _ := trafficEvidenceServer(t)
 	ctx := context.Background()
@@ -100,7 +123,7 @@ func TestReporterTriggerMessageSkeletonReminderMigration(t *testing.T) {
 		}
 	}
 	// 一次性 flag 在服务器启动时已消费,按既有迁移测试模式重置后重跑。
-	if err := pg.SetSetting("reporter_trigger_report_skeleton_v1", "false"); err != nil {
+	if err := pg.SetSetting("reporter_trigger_budget_discipline_v1", "false"); err != nil {
 		t.Fatal(err)
 	}
 	s.upgradeReporterTriggerMessageV2()

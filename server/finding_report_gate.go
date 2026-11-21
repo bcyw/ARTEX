@@ -20,9 +20,32 @@ var findingReportRequiredHeadings = []string{
 // 注意实测合规报告约 140 行,上限须留足余量,不是"建议行数"的翻倍即所得。
 const findingReportMaxLines = 300
 
+// findingReportBannedPhrases 是提交稿正文的内部词汇黑名单:报告是交付给外部的
+// 正式漏洞报告,不得出现内部工具名、worker 名、系统字段或过程元数据。命中即拒绝
+// 入库,错误消息要求改写成面向读者的自然语言。只列不会在正常技术叙述中出现的
+// 内部专名,避免误杀正常词汇(如"版本"单独出现是正常的)。
+var findingReportBannedPhrases = []string{
+	// 内部 agent/工具专名
+	"get_finding_traffic",
+	"get_task_node_detail",
+	"update_finding_report",
+	"report_finding",
+	"bind_finding_traffic",
+	"traffic_search",
+	"traffic_get",
+	"worker#",
+	"work#",
+	// 过程元数据字段(以带值/带冒号的形式出现才有意义,但直接禁词更稳)
+	"bindings",
+	"evidence_version",
+	"report_evidence_version",
+	"finding_node_id",
+	"exploration_nodes",
+}
+
 // validateFindingReport 在 update_finding_report 入库前执行交付物骨架校验:
-// 缺必需章节或超行数的报告拒绝写入,让 agent 拿到错误后按提示词骨架重写。
-// 这是把 report_finding 的 SrcFindingBlocked 式硬闸延伸到最终交付物——
+// 缺必需章节、超行数或正文含内部词汇的报告拒绝写入,让 agent 拿到错误后按提示词
+// 骨架重写。这是把 report_finding 的 SrcFindingBlocked 式硬闸延伸到最终交付物——
 // 报告结构不依赖模型服从性,由系统保证。
 func validateFindingReport(report string) error {
 	if strings.Count(report, "\n")+1 > findingReportMaxLines {
@@ -40,6 +63,15 @@ func validateFindingReport(report string) error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("报告骨架校验失败:缺少必需章节 %s。报告结构必须严格按你系统提示词中的十节骨架撰写(上述标题行逐字使用,独立成行),补齐后重新提交", strings.Join(missing, "、"))
+	}
+	var banned []string
+	for _, p := range findingReportBannedPhrases {
+		if strings.Contains(report, p) {
+			banned = append(banned, p)
+		}
+	}
+	if len(banned) > 0 {
+		return fmt.Errorf("报告正文含内部系统词汇 %s。报告是交付给外部的正式文档,不得出现内部工具名、worker 名或系统字段:请改写为面向读者的自然语言(例如「未绑定自动采集的流量证据,报文依据执行记录中的原始请求还原」),修正后重新提交", strings.Join(banned, "、"))
 	}
 	return nil
 }
