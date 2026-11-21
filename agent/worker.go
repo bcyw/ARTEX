@@ -330,6 +330,9 @@ func renderWorkerGraphOverview(data map[string]any) string {
 	// coverage 是给规划者判断「哪类测得少 / 要不要扩范围」的信号，与 worker「只做领到的
 	// 那条意图、别追未覆盖的点」的职责边界相悖 → 从 worker 视图里剔除。data 是本次 worker
 	// 专属的新 map，删键不影响 planner。
+	// 类型分布（finding_type_counts）与 coverage 同理：是规划者「往哪个方向再平衡」的
+	// 决策信号，worker 只做领到的意图、只从提示纪律感知触顶规则文字 → 一并剔除。
+	delete(data, "finding_type_counts")
 	delete(data, "coverage")
 	b, err := json.Marshal(data)
 	if err != nil {

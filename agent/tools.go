@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -445,6 +446,15 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
 	out["findings_total"] = len(vulnNodes)             // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
 	out["facts"] = len(factNodes)                      // 探索事实/结论数（含否定结论）
+	// finding_type_counts：类型分布反馈（spec：挖掘方向再平衡 L2 软回路）。本任务已产出
+	// finding 按折叠后规范桶名计数，与上限值（cap）同段呈现——规划者据此自主发现「某类
+	// 5、某类 0」式失衡并向词表优先序里未触顶的方向倾斜（软性观测，不设硬指标）。桶内
+	// 计数与 cap 的对比即「还能报几个」；full 标出已触顶的桶。
+	// 口径与同类上限闸一致：排除 quarantined/false_positive/duplicate/ignored（探索节点
+	// state 恒 confirmed，状态真相在 findings 表 → 交叉既有 FindingMetaByNodeID，零新增
+	// SQL）。分布只进规划者态势：worker 渲染路径剔除本键（renderWorkerGraphOverview）。
+	out["finding_type_counts"] = findingTypeCounts(t, vulnNodes)
+
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
 	// 让 planner 每轮判目标时一眼看到最近确认的漏洞；全量/更早的用 list_findings 取。
 	// 每条只留 {id, summary, from_intent?}：from_intent 是产生本漏洞的意图。
@@ -573,6 +583,72 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		}
 	}
 	return out
+}
+
+// findingStatusExcluded reports whether a findings-row status takes the finding
+// out of the effective-output 口径 — the per-type cap gate and the planner's
+// type distribution share it, so only real, non-redundant output counts.
+func findingStatusExcluded(status string) bool {
+	switch status {
+	case db.FindingQuarantined, db.FindingFalsePositive, db.FindingDuplicate, db.FindingIgnored:
+		return true
+	}
+	return false
+}
+
+// findingTypeCounts builds the planner-facing type-distribution block from the
+// already-fetched finding nodes. Buckets come from the hot-loaded hunting-focus
+// fold table (canonical names + alias folding, no type vocabulary in code —
+// ADR-0004); rows render in the hunting block's written (priority) order, then
+// remaining unknown buckets alphabetically, so the planner reads the same
+// ordering it gets in the hunting guidance. Nodes whose standalone findings row
+// is quarantined/false_positive/duplicate/ignored are excluded (same effective
+// 口径 as the per-type cap gate); a node without a findings row for this task
+// keeps its node-level 'confirmed' state and still counts.
+func findingTypeCounts(t *ToolSet, vulnNodes []*db.Node) map[string]any {
+	focus := srcHunting()
+	counts := map[string]int{}
+	var meta map[int64]db.FindingMeta
+	if t.as != nil && t.taskID > 0 {
+		meta, _ = t.as.FindingMetaByNodeID(t.taskID) // 查询失败时回退：按节点 state 全量计数
+	}
+	for _, n := range vulnNodes {
+		var fp map[string]any
+		_ = json.Unmarshal(n.Payload, &fp)
+		vc, _ := fp["vulnclass"].(string)
+		if strings.TrimSpace(vc) == "" {
+			continue // 无类型的 finding 无法入桶；findings_total 已计它
+		}
+		if m, ok := meta[n.ID]; ok && findingStatusExcluded(m.Status) {
+			continue
+		}
+		counts[focus.fold(vc)]++
+	}
+	rows := make([]map[string]any, 0, len(counts))
+	seen := make(map[string]bool, len(counts))
+	for _, bucket := range focus.Types { // 词表书写序 = 优先级序 = 稳定渲染槽位
+		if counts[bucket] > 0 {
+			rows = append(rows, findingTypeCountRow(bucket, counts[bucket], focus.Cap))
+			seen[bucket] = true
+		}
+	}
+	rest := make([]string, 0, len(counts))
+	for bucket := range counts { // 表未覆盖的新类型自成桶，照常计数
+		if !seen[bucket] {
+			rest = append(rest, bucket)
+		}
+	}
+	sort.Strings(rest)
+	for _, bucket := range rest {
+		rows = append(rows, findingTypeCountRow(bucket, counts[bucket], focus.Cap))
+	}
+	return map[string]any{"cap": focus.Cap, "counts": rows}
+}
+
+// findingTypeCountRow renders one bucket; full marks a bucket that has reached
+// the per-type cap so the planner sees at a glance which directions are closed.
+func findingTypeCountRow(bucket string, count, cap int) map[string]any {
+	return map[string]any{"type": bucket, "count": count, "full": count >= cap}
 }
 
 func inheritedMap(m map[string]any, sourceTaskID int64) map[string]any {
