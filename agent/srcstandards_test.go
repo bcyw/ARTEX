@@ -108,11 +108,12 @@ func TestFindingGuidanceWithStandards(t *testing.T) {
 	if !strings.Contains(g, "复测纪律") {
 		t.Fatal("guidance 缺少复测纪律段")
 	}
-	if !strings.Contains(g, "中高危挖掘导向") {
-		t.Fatal("guidance 缺少中高危挖掘导向")
+	// 类型清单已整体迁入热载「挖掘方向」节（standards 文件），常量只保留类型中性行为纪律。
+	if !strings.Contains(g, "挖掘方向") {
+		t.Fatal("guidance 缺少热载挖掘方向节")
 	}
-	if !strings.Contains(g, "反序列化") || !strings.Contains(g, "SSRF") || !strings.Contains(g, "模板注入") {
-		t.Fatal("guidance 高危类别覆盖不全")
+	if !strings.Contains(g, "止损线") || !strings.Contains(g, "触发启发式") {
+		t.Fatal("guidance 缺少类型中性行为纪律（触发启发式/止损线）")
 	}
 	if strings.Contains(g, "短信轰炸、批量注册") {
 		t.Fatal("guidance 挖掘导向仍把短信轰炸/批量注册列为挖掘目标")
@@ -122,6 +123,22 @@ func TestFindingGuidanceWithStandards(t *testing.T) {
 	}
 	if !strings.Contains(g, "响应差异不是漏洞") {
 		t.Fatal("guidance 缺少响应差异止损纪律")
+	}
+}
+
+// TestSrcHighRiskHuntingTypeNeutral 锚定 ADR-0004「类型词表绝不进代码常量」：
+// Go 内置导向常量瘦身为类型中性行为纪律，类型优先级清单只活在热载挖掘方向节。
+func TestSrcHighRiskHuntingTypeNeutral(t *testing.T) {
+	const c = srcHighRiskHunting
+	for _, banned := range []string{"注入类", "SQL 注入", "反序列化", "SSRF", "模板注入", "文件上传", "越权", "业务逻辑", "认证绕过", "账户接管", "水平越权"} {
+		if strings.Contains(c, banned) {
+			t.Fatalf("导向常量仍内嵌类型词 %q（应迁入热载挖掘方向节）", banned)
+		}
+	}
+	for _, keep := range []string{"触发启发式", "止损线", "响应差异不是漏洞", "挖掘方向"} {
+		if !strings.Contains(c, keep) {
+			t.Fatalf("导向常量丢失行为纪律关键词 %q", keep)
+		}
 	}
 }
 

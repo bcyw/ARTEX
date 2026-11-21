@@ -515,11 +515,11 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedWorkerReadbackRebind()  // 修复旧迁移误删：把 search_all_worker_traces/get_worker_trace/node_detail 补绑回 worker(一次性)
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
-	s.reseedGoalsPrompt()             // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
+	s.reseedGoalsPrompt()             // goals 提示词:类型覆盖清单改引用挖掘方向节 → 旧库追加一版新默认(一次性)
 	s.reseedMainAgentPrompt()         // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
-	s.reseedPlannerPrompt()           // planner 提示词:重写「0 意图」正当理由 + 加量化验收核对(一次性)
-	s.reseedWorkerPrompt()            // worker 提示词:加否定结论证据门槛(一次性)
-	s.reseedPentestPrompt()           // pentest 提示词:SRC 挖掘导向(路线按可收性排序+走透=实际危害)(一次性)
+	s.reseedPlannerPrompt()           // planner 提示词:类型排序改引用挖掘方向节+态势类型分布(一次性)
+	s.reseedWorkerPrompt()            // worker 提示词:完成标准例句改类型中性(一次性)
+	s.reseedPentestPrompt()           // pentest 提示词:挖掘排序改引用挖掘方向节(一次性)
 	s.seedReporterAgent()             // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
 	s.upgradeReporterTriggerMessage() // 老库补迁移:让 reporter 回传 evidence_version(一次性)
 	s.upgradeReporterTriggerMessageV2() // 老库补迁移:触发消息补报告骨架提醒(一次性)
@@ -617,10 +617,11 @@ func (s *Server) reseedPromptToDefault(agentKey, flag, tmpl, doneNote string) {
 	log.Printf("[prompts] %s 提示词已追加新默认版本(%s,一次性)", agentKey, doneNote)
 }
 
-// reseedGoalsPrompt 把 goals 目标拆解器的提示词刷成【当前代码默认】——默认正文新增了
-// 「先抽操作约束(set_constraints)再拆目标」这一步。以后默认再变就 bump flag。
+// reseedGoalsPrompt 把 goals 目标拆解器的提示词刷成【当前代码默认】——默认正文的类型覆盖
+// 清单改为引用 SRC 收取标准「挖掘方向」节的规范类型名（代码常量零漏洞类型字符串，ADR-0004）。
+// 以后默认再变就 bump flag。
 func (s *Server) reseedGoalsPrompt() {
-	s.reseedPromptToDefault("goals", "goals_prompt_src_mining_v2", agent.BuiltinPromptSeeds()["goals"], "加入抽操作约束步")
+	s.reseedPromptToDefault("goals", "goals_prompt_src_mining_v3", agent.BuiltinPromptSeeds()["goals"], "类型覆盖清单改引用挖掘方向节")
 }
 
 // reseedMainAgentPrompt 把 mainagent 提示词刷成【当前代码默认】——默认正文新增了「目标全部
@@ -629,26 +630,25 @@ func (s *Server) reseedMainAgentPrompt() {
 	s.reseedPromptToDefault("mainagent", "mainagent_prompt_src_mining_v2", agent.BuiltinPromptSeeds()["mainagent"], "加入目标达成后反问建目标")
 }
 
-// reseedPlannerPrompt 把 planner 提示词刷成【当前代码默认】——默认正文做了精简重构,并把
-// 「克制」降级为仅去重、新增「深度优先于覆盖度」「硬底线:目标未达成且无在跑意图必须产出」、
-// 给否定结论复核加上界。以后默认再变就 bump flag。
+// reseedPlannerPrompt 把 planner 提示词刷成【当前代码默认】——默认正文的类型排序文案
+// 改为引用「挖掘方向节 + 态势类型分布」（持续挖掘目标判据同步对齐挖掘方向节，代码常量
+// 零漏洞类型字符串）。以后默认再变就 bump flag。
 func (s *Server) reseedPlannerPrompt() {
-	s.reseedPromptToDefault("planner", "planner_prompt_src_mining_v3", agent.BuiltinPromptSeeds()["planner"], "精简重构+克制降级去重+深度优先+否定复核上界")
+	s.reseedPromptToDefault("planner", "planner_prompt_src_mining_v4", agent.BuiltinPromptSeeds()["planner"], "类型排序改引用挖掘方向节+态势类型分布")
 }
 
-// reseedWorkerPrompt 把 worker 提示词刷成【当前代码默认】——默认正文 record_fact 段删掉了
-// 「否定类结论写观察+试探性读法」整句、并把 confidence(observed/inferred)与「是否穷尽本意图
-// 手段」解耦(这些易误导规划者),同时把 facts 数组分条收紧为「彼此完全独立、无法归并」的极少数
-// 例外。以后默认再变就 bump flag。
+// reseedWorkerPrompt 把 worker 提示词刷成【当前代码默认】——默认正文「SRC 挖掘的完成标准」
+// 的类型例句改为类型中性表述（危害最小证明物见收取标准，代码常量零漏洞类型字符串）。
+// 以后默认再变就 bump flag。
 func (s *Server) reseedWorkerPrompt() {
-	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v5", agent.BuiltinPromptSeeds()["worker"], "查上下文段收敛为 list_assets/list_findings,去掉 list_facts/node_detail/asset_neighbors")
+	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v6", agent.BuiltinPromptSeeds()["worker"], "完成标准例句改类型中性")
 }
 
-// reseedPentestPrompt 把 pentest 提示词刷成【当前代码默认】——默认正文加入 SRC 挖掘导向:
-// 路线组合按 SRC 可收性排序(业务逻辑面优先级不低于注入类)、走透=挖到实际危害、
-// 判定达成以实际危害证据为准。以后默认再变就 bump flag。
+// reseedPentestPrompt 把 pentest 提示词刷成【当前代码默认】——默认正文 SRC 挖掘排序
+// 改为引用「挖掘方向节」的类型优先级（代码常量零漏洞类型字符串，ADR-0004）。
+// 以后默认再变就 bump flag。
 func (s *Server) reseedPentestPrompt() {
-	s.reseedPromptToDefault("pentest", "pentest_prompt_src_mining_v1", agent.BuiltinPromptSeeds()["pentest"], "SRC 挖掘导向")
+	s.reseedPromptToDefault("pentest", "pentest_prompt_src_mining_v2", agent.BuiltinPromptSeeds()["pentest"], "挖掘排序改引用挖掘方向节")
 }
 
 // reporterToolCallMessage 必须无条件要求先读一次 get_finding_traffic 再写报告。
