@@ -515,17 +515,17 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedWorkerReadbackRebind()  // 修复旧迁移误删：把 search_all_worker_traces/get_worker_trace/node_detail 补绑回 worker(一次性)
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
-	s.reseedGoalsPrompt()             // goals 提示词:类型覆盖清单改引用挖掘方向节 → 旧库追加一版新默认(一次性)
-	s.reseedMainAgentPrompt()         // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
-	s.reseedPlannerPrompt()           // planner 提示词:类型排序改引用挖掘方向节+态势类型分布(一次性)
-	s.reseedWorkerPrompt()            // worker 提示词:完成标准例句改类型中性(一次性)
-	s.reseedPentestPrompt()           // pentest 提示词:挖掘排序改引用挖掘方向节(一次性)
-	s.seedReporterAgent()             // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
-	s.upgradeReporterTriggerMessage() // 老库补迁移:让 reporter 回传 evidence_version(一次性)
+	s.reseedGoalsPrompt()               // goals 提示词:类型覆盖清单改引用挖掘方向节 → 旧库追加一版新默认(一次性)
+	s.reseedMainAgentPrompt()           // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
+	s.reseedPlannerPrompt()             // planner 提示词:类型排序改引用挖掘方向节+态势类型分布(一次性)
+	s.reseedWorkerPrompt()              // worker 提示词:完成标准例句改类型中性(一次性)
+	s.reseedPentestPrompt()             // pentest 提示词:挖掘排序改引用挖掘方向节(一次性)
+	s.seedReporterAgent()               // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
+	s.upgradeReporterTriggerMessage()   // 老库补迁移:让 reporter 回传 evidence_version(一次性)
 	s.upgradeReporterTriggerMessageV2() // 老库补迁移:触发消息补报告骨架提醒(一次性)
-	s.reseedReporterPrompt()          // reporter 提示词重写为 SRC 提交稿标准(一次性)
-	s.seedFindingTrafficTools()       // 增加可选证据参数及只读证据工具，保留用户配置
-	s.seedFindingReportFields()       // report_finding 增加交付报告分节字段(description/impact/remediation/session)
+	s.reseedReporterPrompt()            // reporter 提示词重写为 SRC 提交稿标准(一次性)
+	s.seedFindingTrafficTools()         // 增加可选证据参数及只读证据工具，保留用户配置
+	s.seedFindingReportFields()         // report_finding 增加交付报告分节字段(description/impact/remediation/session)
 	s.seedFindingWorkflowTools()
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同

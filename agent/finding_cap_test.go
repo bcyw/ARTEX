@@ -121,6 +121,22 @@ func TestReportFindingCapExcludesInvalidStatus(t *testing.T) {
 	}
 }
 
+func TestReportFindingCapMetaUnavailableNoGate(t *testing.T) {
+	// AssetStore 缺席（nil）时无法交叉 findings 表状态：按节点存在宽松计数，
+	// 同桶计数仍应触顶；绝不因 meta 不可用而放行无限上报，也不误杀（口径与
+	// findingTypeCounts 的回退方向一致：审查修复项 1）。
+	ts, _ := capToolSet(t)
+	ts.as = nil // 模拟 meta 交叉不可用
+	for i := 0; i < 3; i++ {
+		if got := capReport(t, ts, "GraphQL 滥用"); !strings.HasPrefix(got, "finding recorded: ") {
+			t.Fatalf("meta 不可用时第 %d 条被误拒: %s", i+1, got)
+		}
+	}
+	if got := capReport(t, ts, "GraphQL 滥用"); !strings.Contains(got, "同类上限") {
+		t.Fatalf("meta 不可用时同桶计数仍应触顶（按节点存在计）: %s", got)
+	}
+}
+
 func TestReportFindingCapIndependentClasses(t *testing.T) {
 	ts, _ := capToolSet(t)
 	for i := 0; i < 3; i++ {

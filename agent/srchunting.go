@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -85,7 +86,7 @@ func parseSrcHunting(text string) srcHuntingFocus {
 		}
 		// 规范桶行：桶名自身与各别名都以归一形入表、指向桶名原文；重复出现的
 		// 桶名只入清单一次（别名合并，后行覆盖同键）。
-		if !containsString(f.Types, key) {
+		if !slices.Contains(f.Types, key) {
 			f.Types = append(f.Types, key)
 		}
 		f.Fold[srcFoldKey(key)] = key

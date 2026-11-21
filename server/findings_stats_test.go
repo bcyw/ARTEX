@@ -26,7 +26,9 @@ func TestFindingStatsFoldsVulnClassCountsIntoCanonicalBuckets(t *testing.T) {
 	}
 	t.Cleanup(func() { m.Close() })
 	marker := fmt.Sprintf("__server_stats_fold_%d__", time.Now().UnixNano())
-	defer func() { _, _ = m.pg.Exec(`DELETE FROM findings WHERE vulnclass IN ($1,'sql_injection',$2,$3)`, marker, "SQL 注入", "GraphQL 滥用") }()
+	defer func() {
+		_, _ = m.pg.Exec(`DELETE FROM findings WHERE vulnclass IN ($1,'sql_injection',$2,$3)`, marker, "SQL 注入", "GraphQL 滥用")
+	}()
 
 	task, err := m.CreateTask("stats fold task", "goal", nil, 0, 0)
 	if err != nil {
@@ -68,8 +70,8 @@ func TestFindingStatsFoldsVulnClassCountsIntoCanonicalBuckets(t *testing.T) {
 		t.Fatalf("stats status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	var st struct {
-		VulnClasses      []string `json:"vulnclasses"`
-		VulnClassCounts  []struct {
+		VulnClasses     []string `json:"vulnclasses"`
+		VulnClassCounts []struct {
 			VulnClass string   `json:"vulnclass"`
 			Count     int      `json:"count"`
 			Confirmed int      `json:"confirmed"`
@@ -161,7 +163,9 @@ func TestFindingsListFilterExpandsCanonicalBucket(t *testing.T) {
 	}
 	t.Cleanup(func() { m.Close() })
 	marker := fmt.Sprintf("__server_bucket_expand_%d__", time.Now().UnixNano())
-	defer func() { _, _ = m.pg.Exec(`DELETE FROM findings WHERE vulnclass IN ($1,'sql_injection',$2)`, marker, "SQL 注入") }()
+	defer func() {
+		_, _ = m.pg.Exec(`DELETE FROM findings WHERE vulnclass IN ($1,'sql_injection',$2)`, marker, "SQL 注入")
+	}()
 
 	task, err := m.CreateTask("bucket expand task", "goal", nil, 0, 0)
 	if err != nil {

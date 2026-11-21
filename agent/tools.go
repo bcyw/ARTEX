@@ -596,6 +596,21 @@ func findingStatusExcluded(status string) bool {
 	return false
 }
 
+// findingStatusMeta 取本任务 finding 节点在独立 findings 表的状态真相
+// （nodeID → status）。AssetStore 缺席、taskID 未设或查询失败时返回 nil：
+// 调用方回退为「节点存在即计」的宽松口径——排除信息缺失时宁可多计也不漏计
+// （更早触顶、分布偏宽），语义为 findingTypeCounts / srcClassCapReached 共享。
+func (t *ToolSet) findingStatusMeta() map[int64]db.FindingMeta {
+	if t.as == nil || t.taskID <= 0 {
+		return nil
+	}
+	meta, err := t.as.FindingMetaByNodeID(t.taskID)
+	if err != nil {
+		return nil
+	}
+	return meta
+}
+
 // findingTypeCounts builds the planner-facing type-distribution block from the
 // already-fetched finding nodes. Buckets come from the hot-loaded hunting-focus
 // fold table (canonical names + alias folding, no type vocabulary in code —
@@ -608,10 +623,7 @@ func findingStatusExcluded(status string) bool {
 func findingTypeCounts(t *ToolSet, vulnNodes []*db.Node) map[string]any {
 	focus := srcHunting()
 	counts := map[string]int{}
-	var meta map[int64]db.FindingMeta
-	if t.as != nil && t.taskID > 0 {
-		meta, _ = t.as.FindingMetaByNodeID(t.taskID) // 查询失败时回退：按节点 state 全量计数
-	}
+	meta := t.findingStatusMeta()
 	for _, n := range vulnNodes {
 		var fp map[string]any
 		_ = json.Unmarshal(n.Payload, &fp)

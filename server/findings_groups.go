@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -84,7 +85,7 @@ func foldFindingVulnClassStats(st *db.FindingStats) {
 		}
 		b.count += row.Count
 		b.confirmed += row.Confirmed
-		if row.VulnClass != "" && !containsFoldedValue(b.values, row.VulnClass) {
+		if row.VulnClass != "" && !slices.Contains(b.values, row.VulnClass) {
 			b.values = append(b.values, row.VulnClass)
 		}
 	}
@@ -102,17 +103,6 @@ func foldFindingVulnClassStats(st *db.FindingStats) {
 		return folded[i].VulnClass < folded[j].VulnClass
 	})
 	st.VulnClassCounts = folded
-}
-
-// containsFoldedValue 报告折叠桶的原始写法清单是否已含该写法(精确匹配——
-// 同一写法只在 stats 的 GROUP BY 出现一次,重复只可能来自冷档合并的拼接)。
-func containsFoldedValue(values []string, v string) bool {
-	for _, item := range values {
-		if item == v {
-			return true
-		}
-	}
-	return false
 }
 
 // findingGroups serves the task-group page used by the global findings view.
