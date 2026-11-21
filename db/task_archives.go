@@ -738,8 +738,11 @@ FROM skill_usage WHERE (task_id=$1 OR exploration_id=$2) AND NOT found GROUP BY 
  'total',count(*),'pending',count(*) FILTER (WHERE status='pending'),
  'critical',count(*) FILTER (WHERE severity='critical'),'high',count(*) FILTER (WHERE severity='high'),
  'medium',count(*) FILTER (WHERE severity='medium'),'low',count(*) FILTER (WHERE severity='low'),
- 'vulnclasses',COALESCE(json_group_array(DISTINCT vulnclass) FILTER (WHERE vulnclass<>''),'[]'))
-FROM findings WHERE task_id=$1`, []any{taskID}},
+ 'vulnclasses',COALESCE(json_group_array(DISTINCT vulnclass) FILTER (WHERE vulnclass<>''),'[]'),
+ 'vulnclass_counts',COALESCE((SELECT json_group_array(json_object('vulnclass',vulnclass,'count',cnt,'confirmed',conf))
+   FROM (SELECT vulnclass,count(*) cnt,count(*) FILTER (WHERE status='confirmed') conf
+         FROM findings WHERE vulnclass<>'' AND task_id=$1 GROUP BY vulnclass)),'[]'))
+FROM findings WHERE task_id=$1`, []any{taskID, taskID}},
 	} {
 		var raw []byte
 		if strings.HasPrefix(item.query, "SELECT archive_json_rows FROM (") {

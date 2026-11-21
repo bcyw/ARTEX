@@ -112,6 +112,13 @@ func srcFoldVulnClass(vulnclass string) string {
 	return srcHunting().fold(vulnclass)
 }
 
+// SrcFoldVulnClass 把任一 vulnclass 写法折叠到规范桶名，供包外消费（票 05：
+// server 呈现层按规范桶合并类型分布；db 包不 import agent，折叠只在呈现层做）。
+// 未覆盖的写法以归一形自成一桶、绝不拒收——语义同 srcFoldVulnClass。
+func SrcFoldVulnClass(vulnclass string) string {
+	return srcFoldVulnClass(vulnclass)
+}
+
 // srcFoldKey 是 vulnclass 的机械归一：小写、去空白与 - / _ 分隔符。
 // 「SQL 注入」「sql-injection」「Sql_Injection」归一为同键；归一只做机械
 // 变形、不含任何词表——类型词表住在热载文件里（ADR-0004 硬约束）。

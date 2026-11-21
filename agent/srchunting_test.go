@@ -115,6 +115,14 @@ func TestSrcFoldVulnClass(t *testing.T) {
 	if got := srcFoldVulnClass("   "); got != "" {
 		t.Errorf("srcFoldVulnClass(空白串) = %q, want 空串", got)
 	}
+	// 导出入口（票 05）：供 server 呈现层把原始写法折叠到规范桶。导出与内部
+	// 同一来源,断言两个代表写法与未覆盖写法,防将来导出口径漂移。
+	if got := SrcFoldVulnClass("sql_injection"); got != "注入类" {
+		t.Errorf("SrcFoldVulnClass(sql_injection) = %q, want 注入类", got)
+	}
+	if got := SrcFoldVulnClass("GraphQL 滥用"); got != "graphql滥用" {
+		t.Errorf("SrcFoldVulnClass(未覆盖写法) = %q, want 归一形自成一桶", got)
+	}
 }
 
 // TestSrcHuntingOverrideAndHotReload 锁热载与容错（票 01 验收：节改动后重启

@@ -480,7 +480,15 @@ function mockFilterFindings(q: URLSearchParams): (typeof mockFindings)[number][]
   const taskID = q.get("task_id");
   if (severity) list = list.filter((finding) => finding.severity === severity);
   if (status) list = list.filter((finding) => finding.status === status);
-  if (vulnclass) list = list.filter((finding) => finding.vulnclass === vulnclass);
+  // 类型筛选与后端同语义:逗号串 = 多值 IN(前端把选中的桶展开成原始写法清单)。
+  if (vulnclass) {
+    const wanted = vulnclass
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (wanted.length > 1) list = list.filter((finding) => wanted.includes(finding.vulnclass));
+    else list = list.filter((finding) => finding.vulnclass === vulnclass);
+  }
   if (taskID === "__unassigned__") list = list.filter((finding) => !finding.task_id);
   else if (taskID) list = list.filter((finding) => finding.task_id === taskID);
   return list;
@@ -1889,6 +1897,20 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/exploration/frontier") return D.frontier;
   if (path === "/exploration/findings/stats") {
     const vulnclasses = Array.from(new Set(mockFindings.map((f) => f.vulnclass))).sort();
+    // 类型分布:每个原始写法一行,总数 + 已确认数,计数降序(mock 无词表,不折叠
+    // ——词表只住后端热载标准文件;真后端在呈现层按规范桶合并)。
+    const classMap = new Map<string, { count: number; confirmed: number }>();
+    for (const f of mockFindings) {
+      const cur = classMap.get(f.vulnclass) ?? { count: 0, confirmed: 0 };
+      cur.count++;
+      if (f.status === "confirmed") cur.confirmed++;
+      classMap.set(f.vulnclass, cur);
+    }
+    const vulnclassCounts = Array.from(classMap, ([vulnclass, v]) => ({
+      vulnclass,
+      count: v.count,
+      confirmed: v.confirmed,
+    })).sort((left, right) => right.count - left.count || left.vulnclass.localeCompare(right.vulnclass));
     // 「按任务」下拉:有漏洞的任务 + 描述 + 条数(mock 任务 id 是字符串,直接当 id 用)。
     const taskMap = new Map<string, { name: string; description: string; count: number }>();
     for (const f of mockFindings) {
@@ -1911,6 +1933,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       medium: mockFindings.filter((f) => f.severity === "medium").length,
       low: mockFindings.filter((f) => f.severity === "low").length,
       vulnclasses,
+      vulnclass_counts: vulnclassCounts,
       tasks,
     };
   }
