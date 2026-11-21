@@ -64,6 +64,19 @@ func TestSrcFindingBlocked(t *testing.T) {
 		// 连写归一:下划线/空格/连字符写法同形匹配。
 		{"用户名枚举空格英文拦截", "other", "Username Enumeration", "响应差异可枚举", "", "", true, true},
 		{"反射XSS连字符拦截", "other", "Reflected-XSS", "", "", "", true, true},
+		// #12 短信轰炸/无频控发码:拦截 + 升级放行。
+		{"短信轰炸拦截", "sms_bombing", "短信轰炸", "无频控可向任意手机号发码", "", "", true, true},
+		{"短信轰炸中文关键词拦截", "other", "验证码接口短信轰炸", "匿名可跨号下发", "", "", true, true},
+		{"短信轰炸升级放行", "sms_bombing", "短信轰炸", "升级证据：发码链配合重置缺陷实际接管任意账户", "", "", false, false},
+		{"正常验证码绕过不误杀", "auth_bypass", "验证码回显导致任意账户接管", "响应体回显验证码可登录他人账号", "", "", false, false},
+		// #13 仅凭状态码/报错/响应差异:拦显式自称形态,已证实的不拦。
+		{"仅状态码拦截", "other", "接口异常", "仅凭状态码差异判定未授权", "", "", true, true},
+		{"仅响应差异拦截", "other", "响应差异", "仅响应差异可区分账号", "", "", true, true},
+		{"状态码差异已证实不拦", "idor", "水平越权", "403变200且返回他人订单数据", "", "", false, false},
+		{"布尔盲注不误杀", "sqli", "布尔盲注", "时间差+注出库名内容", "", "", false, false},
+		// #11 扩展:手机号枚举/存在性。
+		{"手机号枚举拦截", "other", "手机号枚举", "注册接口可探测手机号已注册", "", "", true, true},
+		{"手机号存在性英文拦截", "phone_enumeration", "", "", "", "", true, true},
 	}
 	for _, c := range cases {
 		t.Run(c.desc, func(t *testing.T) {
@@ -100,6 +113,15 @@ func TestFindingGuidanceWithStandards(t *testing.T) {
 	}
 	if !strings.Contains(g, "反序列化") || !strings.Contains(g, "SSRF") || !strings.Contains(g, "模板注入") {
 		t.Fatal("guidance 高危类别覆盖不全")
+	}
+	if strings.Contains(g, "短信轰炸、批量注册") {
+		t.Fatal("guidance 挖掘导向仍把短信轰炸/批量注册列为挖掘目标")
+	}
+	if !strings.Contains(g, "不挖清单") {
+		t.Fatal("guidance 缺少不挖清单段")
+	}
+	if !strings.Contains(g, "响应差异不是漏洞") {
+		t.Fatal("guidance 缺少响应差异止损纪律")
 	}
 }
 
