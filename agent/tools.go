@@ -1270,6 +1270,13 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if !db.ValidSeverity(a.Severity) {
 			return actool.Errorf("severity 必须为 critical / high / medium / low 之一（按 SRC 定级纪律选择：拿不准降级不升级）"), nil
 		}
+		// 同类上限闸：单任务内单一漏洞类型的有效产出（pending+confirmed）触顶即
+		// 拒收并引导转向；上限值与折叠词表均在热载标准文件维护（见 finding_cap.go
+		// 与 srchunting.go），代码不含类型词表常量（ADR-0004）。先于黑名单闸：
+		// 隔离上报不消耗名额，两个闸互不干扰。
+		if n, limit, reached := t.srcClassCapReached(a.VulnClass); reached {
+			return actool.Errorf(fmt.Sprintf("同类上限触顶：本任务该类型（%s）有效产出已达 %d/%d，不再接收新 finding。请补强已有 finding（追加证据与影响面，同根因不另立新报），或改用 record_fact 记录本次观察，并把探索方向转向其他未触顶类型", a.VulnClass, n, limit)), nil
+		}
 		// SRC 黑名单硬闸：命中且无升级证据 → 入库进隔离区（status=quarantined），
 		// 不删除（保留排查误杀的余地）、不进交付报告（报告只取 confirmed）。
 		// input 先完整构造（与正常路径同一份，含 IntentID/AssetIDs——隔离 finding
