@@ -23,6 +23,9 @@ web/next-env.d.ts
 .vscode/
 *.swp
 *.swo
+# 本地 issue 跟踪与 DSH 探针（会话工作区状态，不提交）
+.scratch/
+.dsh-write-probe
 
 # docs
 /docs/*
