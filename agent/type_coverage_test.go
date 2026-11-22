@@ -119,6 +119,25 @@ func TestGraphOverviewTypeCoverageCatalogOrder(t *testing.T) {
 	}
 }
 
+// TestGraphOverviewTypeCoverageUnavailableNodes degrades unreadable prefetches
+// to zero counts while retaining the catalog rows.
+func TestGraphOverviewTypeCoverageUnavailableNodes(t *testing.T) {
+	catalog := requireCatalogEntries(t, 1)
+	d, _, tools := newTypeCoverageFixture(t)
+	d.Close()
+	rows := typeCoverageFrom(t, tools.graphOverviewData())
+	if len(rows) != len(catalog.Entries) {
+		t.Fatalf("rows = %d, want %d despite unavailable nodes", len(rows), len(catalog.Entries))
+	}
+	for _, row := range rows {
+		for _, key := range []string{"findings", "intents_open", "intents_running", "intents_done"} {
+			if got := rowInt(t, row, key); got != 0 {
+				t.Errorf("%s = %d, want 0 with unavailable nodes", key, got)
+			}
+		}
+	}
+}
+
 // TestGraphOverviewTypeCoverageFindings pins the findings column: it folds alias
 // spellings into the catalog bucket, excludes quarantined/false_positive/
 // duplicate/ignored rows, agrees with finding_type_counts, and keeps catalog-outside
@@ -181,6 +200,28 @@ func TestGraphOverviewTypeCoverageFindings(t *testing.T) {
 	}
 	if _, hit := counts[srcFoldKey(outside)]; !hit {
 		t.Fatalf("finding_type_counts should still carry the catalog-outside bucket %q: %#v", srcFoldKey(outside), counts)
+	}
+}
+
+// TestGraphOverviewTypeCoverageUsesNodeStatusWithoutFindingRow verifies the
+// fallback for historical graph-only findings through both planner counters.
+func TestGraphOverviewTypeCoverageUsesNodeStatusWithoutFindingRow(t *testing.T) {
+	catalog := requireCatalogEntries(t, 1)
+	_, store, tools := newTypeCoverageFixture(t)
+	typ := catalog.Entries[0].Name
+	for _, state := range []string{"confirmed", "dismissed"} {
+		if _, err := store.AddNode(db.KindFinding, map[string]any{"vulnclass": typ}, 0, state, "worker", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	overview := tools.graphOverviewData()
+	row := typeCoverageRow(t, typeCoverageFrom(t, overview), typ)
+	if got := rowInt(t, row, "findings"); got != 1 {
+		t.Errorf("graph-only findings = %d, want 1 (confirmed; dismissed excluded)", got)
+	}
+	dist := overview["finding_type_counts"].(map[string]any)["counts"].([]map[string]any)
+	if len(dist) != 1 || dist[0]["count"] != 1 {
+		t.Errorf("finding_type_counts = %#v, want one bucket with count 1", dist)
 	}
 }
 
@@ -265,7 +306,10 @@ func TestGraphOverviewTypeCoverageIntentStates(t *testing.T) {
 	add(typ, "running")
 	add(typ, "done")
 	add(typ, "blocked") // 终态一律计 done
+	add(typ, "exhausted")
+	add(typ, "stopped")
 	add(typ, "paused")  // 暂停不计
+	add(typ, "deleted") // 已删除不计
 	add("", "open")     // 无 vuln_type 不计
 	add(outside, "open")
 
@@ -277,11 +321,37 @@ func TestGraphOverviewTypeCoverageIntentStates(t *testing.T) {
 	if n := rowInt(t, row, "intents_running"); n != 1 {
 		t.Fatalf("intents_running = %d, want 1", n)
 	}
-	if n := rowInt(t, row, "intents_done"); n != 2 {
-		t.Fatalf("intents_done = %d, want 2 (done + blocked terminal)", n)
+	if n := rowInt(t, row, "intents_done"); n != 4 {
+		t.Fatalf("intents_done = %d, want 4 (done + blocked + exhausted + stopped)", n)
 	}
 	if _, hit := typeCoverageRowNoFatal(rows, outside); hit {
 		t.Fatalf("catalog-outside intent must not create a type_coverage row")
+	}
+}
+
+// TestGraphOverviewTypeCoverageIncludesOlderIntents verifies that the coverage
+// counters describe the whole task even when its intent detail windows overflow.
+func TestGraphOverviewTypeCoverageIncludesOlderIntents(t *testing.T) {
+	catalog := requireCatalogEntries(t, 1)
+	_, store, tools := newTypeCoverageFixture(t)
+	typ := catalog.Entries[0].Name
+	for _, state := range []string{"open", "running", "done", "blocked", "exhausted", "stopped"} {
+		if _, err := store.AddNode(db.KindIntent, map[string]any{"vuln_type": typ}, 5, state, "planner", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Newer reconnaissance intents push every typed intent beyond the old
+	// 300-node prefetch window without contributing to the type counters.
+	for range 301 {
+		if _, err := store.AddNode(db.KindIntent, map[string]any{"summary": "recon"}, 0, "done", "planner", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	row := typeCoverageRow(t, typeCoverageFrom(t, tools.graphOverviewData()), typ)
+	for key, want := range map[string]int{"intents_open": 1, "intents_running": 1, "intents_done": 4} {
+		if got := rowInt(t, row, key); got != want {
+			t.Errorf("%s = %d, want %d including older intents", key, got, want)
+		}
 	}
 }
 

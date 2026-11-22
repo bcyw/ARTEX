@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -412,7 +413,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	const openIntentsCap = 30
 	fr, _ := t.ts.Frontier(openIntentsCap) // priority DESC, id ASC —— 优先级最高的前 N 条；真实总数见 frontier_open
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
-	all, _ := t.ts.ListByKind(db.KindIntent, 300)
+	// Coverage counters need every intent, including older nodes outside the
+	// frontier/recent-done display windows. Reuse this query without a row cap.
+	all, _ := t.ts.ListByKind(db.KindIntent, math.MaxInt)
 	var running, recentDone []*db.Node
 	for _, n := range all {
 		switch n.State {
@@ -468,8 +471,8 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	//              paused/deleted/未知态不计（暂停不可领取、删除等于不存在——宁可少计，
 	//              也不让已撤销方向假装排过队）。意图按目录 fold 归桶；目录外写法自成
 	//              一桶但不进本表（覆盖表只服务「按目录规划」）。
-	// 零新增 SQL：finding 与意图节点都是本函数上方已预取的列表（意图取最新 300 条
-	// 窗口）；意图列表取不到时该行 intents_* 全为 0、不报错。与 finding_type_counts
+	// 零新增 SQL：finding 与意图节点都是本函数上方已预取的列表；意图预取不截断，
+	// 明细窗口不影响覆盖计数。意图列表取不到时该行 intents_* 全为 0、不报错。与 finding_type_counts
 	// 同理仅规划者可见（worker 渲染路径剔除）。
 	out["type_coverage"] = typeCoverageRows(srcCatalog(), typeBuckets, all)
 
@@ -608,7 +611,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 // type distribution share it, so only real, non-redundant output counts.
 func findingStatusExcluded(status string) bool {
 	switch status {
-	case db.FindingQuarantined, db.FindingFalsePositive, db.FindingDuplicate, db.FindingIgnored:
+	case db.FindingQuarantined, db.FindingFalsePositive, db.FindingDuplicate, db.FindingIgnored, "dismissed":
 		return true
 	}
 	return false
@@ -616,8 +619,8 @@ func findingStatusExcluded(status string) bool {
 
 // findingStatusMeta 取本任务 finding 节点在独立 findings 表的状态真相
 // （nodeID → status）。AssetStore 缺席、taskID 未设或查询失败时返回 nil：
-// 调用方回退为「节点存在即计」的宽松口径——排除信息缺失时宁可多计也不漏计
-// （更早触顶、分布偏宽），语义为 findingTypeCounts / srcClassCapReached 共享。
+// 调用方回退到节点态（confirmed 计入、dismissed 排除），语义为
+// findingTypeCounts / srcClassCapReached 共享。
 func (t *ToolSet) findingStatusMeta() map[int64]db.FindingMeta {
 	if t.as == nil || t.taskID <= 0 {
 		return nil
@@ -634,8 +637,8 @@ func (t *ToolSet) findingStatusMeta() map[int64]db.FindingMeta {
 // the hot-loaded hunting-focus fold table (canonical names + alias folding, no
 // type vocabulary in code — ADR-0004). Nodes whose standalone findings row is
 // quarantined/false_positive/duplicate/ignored are excluded (same effective 口径
-// as the per-type cap gate); a node without a findings row for this task keeps
-// its node-level 'confirmed' state and still counts. Shared by
+// as the per-type cap gate); a node without a findings row for this task uses
+// its node-level state (confirmed counts, dismissed does not). Shared by
 // finding_type_counts and type_coverage so the two never disagree.
 func findingTypeBuckets(t *ToolSet, vulnNodes []*db.Node) map[string]int {
 	focus := srcHunting()
@@ -648,7 +651,11 @@ func findingTypeBuckets(t *ToolSet, vulnNodes []*db.Node) map[string]int {
 		if strings.TrimSpace(vc) == "" {
 			continue // 无类型的 finding 无法入桶；findings_total 已计它
 		}
-		if m, ok := meta[n.ID]; ok && findingStatusExcluded(m.Status) {
+		status := n.State
+		if m, ok := meta[n.ID]; ok {
+			status = m.Status
+		}
+		if findingStatusExcluded(status) {
 			continue
 		}
 		counts[focus.fold(vc)]++

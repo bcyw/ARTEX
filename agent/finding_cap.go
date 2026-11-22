@@ -24,8 +24,8 @@ import (
 // 数，并报告是否已达同类上限。返回 (有效数, 上限, 是否触顶)。计数经
 // findingStatusMeta 交叉 findings 表状态（与态势类型分布共享同一口径实现）。
 // 统计源不可用（ListByKind 失败）时不放闸：拒收必须基于确定的计数，宁放勿误杀；
-// 状态真相不可交叉（AssetStore 缺席或查询失败）时回退为「节点存在即计」的
-// 宽松口径——与 findingTypeCounts 的回退方向一致（见 findingStatusMeta 注释）。
+// 状态真相不可交叉（AssetStore 缺席或查询失败）时回退到节点态
+// （confirmed 计入、dismissed 排除），与 findingTypeCounts 共享口径。
 func (t *ToolSet) srcClassCapReached(vulnclass string) (int, int, bool) {
 	focus := srcHunting()
 	bucket := focus.fold(vulnclass)
@@ -44,7 +44,11 @@ func (t *ToolSet) srcClassCapReached(vulnclass string) (int, int, bool) {
 		if focus.fold(vc) != bucket {
 			continue
 		}
-		if m, ok := meta[n.ID]; ok && findingStatusExcluded(m.Status) {
+		status := n.State
+		if m, ok := meta[n.ID]; ok {
+			status = m.Status
+		}
+		if findingStatusExcluded(status) {
 			continue
 		}
 		count++
