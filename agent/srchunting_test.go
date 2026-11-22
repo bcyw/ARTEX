@@ -161,7 +161,7 @@ func TestSrcFoldVulnClass(t *testing.T) {
 }
 
 // TestSrcHuntingOverrideAndHotReload 锁热载与容错（票 01 验收：目录块改动后
-// 重启进程即生效；自定义平台口径无机器可查区时优雅回退——零词表 + 默认上限，
+// 重启进程即生效；自定义平台口径无机器可查区时目录回退内嵌默认、正文保持，
 // 一切写法自成一桶，绝不拒收）。
 func TestSrcHuntingOverrideAndHotReload(t *testing.T) {
 	dir := t.TempDir()
@@ -213,17 +213,21 @@ func TestSrcHuntingOverrideAndHotReload(t *testing.T) {
 		t.Errorf("热改后规范名清单 = %v, want [甲类 丙类]", f.Types)
 	}
 
-	// 无机器可查区的自定义标准：回退零词表 + 默认上限 3，不拒收。
+	// 无机器可查区的自定义标准：目录回退内嵌默认（词表与上限完整），自定义正文
+	// 保持不变——手改正文不丢机器语义；目录未覆盖的写法仍自成一桶、不拒收。
 	write("只有正文，没有机器可查区\n")
 	c = srcCatalog()
 	if c.Cap != srcHuntingCapDefault {
 		t.Errorf("无块时 cap = %d, want 默认 %d", c.Cap, srcHuntingCapDefault)
 	}
-	if len(c.Entries) != 0 {
-		t.Errorf("无块时目录应为空, got %v", c.Entries)
+	if len(c.Entries) == 0 {
+		t.Errorf("无块时应回退内嵌默认目录, 条目 = 0")
+	}
+	if got := srcFoldVulnClass("sqli"); got != "注入类" {
+		t.Errorf("回退默认目录后别名折叠 sqli = %q, want 注入类", got)
 	}
 	if got := srcFoldVulnClass("任意新写法"); got != "任意新写法" {
-		t.Errorf("无块时折叠 = %q, want 自成一桶", got)
+		t.Errorf("目录未覆盖写法折叠 = %q, want 自成一桶", got)
 	}
 
 	// 容错：非法 cap、无冒号行、空键行、空 type 名、未知键一律跳过，块整体仍

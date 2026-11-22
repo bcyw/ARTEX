@@ -102,10 +102,28 @@ func TestReportFindingTypeAnchoredToIntent(t *testing.T) {
 	if f != nil {
 		t.Fatalf("类型不一致的上报未被拒收: %s", got)
 	}
-	for _, want := range []string{"类型归属不符", "注入类", "越权", "补强已有 finding"} {
+	for _, want := range []string{"类型归属不符", "注入类", "越权", "补强已有 finding", "注出一条真实数据"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("拒收文案缺少要素 %q: %s", want, got)
 		}
+	}
+}
+
+func TestReportFindingWorkerIntentCannotBeBypassed(t *testing.T) {
+	ts, d := typeAnchorToolSet(t)
+	intentID := anchorIntent(t, ts, "注入类")
+	reconID := anchorIntent(t, ts, "")
+	ts.SetOwnerNode(intentID)
+	for _, body := range []map[string]any{
+		{"vulnclass": "越权"},
+		{"intent_id": reconID, "vulnclass": "越权"},
+	} {
+		if got, f := anchorReport(t, ts, d, body); f != nil {
+			t.Fatalf("worker 绕过了当前意图的类型约束: %s", got)
+		}
+	}
+	if got, f := anchorReport(t, ts, d, map[string]any{}); f == nil || f.VulnClass != "注入类" {
+		t.Fatalf("worker 省略 intent_id 未继承当前意图类型: %s", got)
 	}
 }
 

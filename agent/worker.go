@@ -339,9 +339,8 @@ func renderIntentTask(intent *db.Node) string {
 // type content comes from the hot-reloaded catalog (票 01) — this function holds
 // zero vuln-type literals (ADR-0004). vulnType empty (recon intent) → no card.
 //
-// Degraded path: the catalog may be temporarily broken (hot edit) or a historical
-// intent may name an entry that has since been deleted. Then the card degrades to
-// 「类型：<原值>」+ generic discipline instead of panicking or blocking the worker.
+// 目录里查不到该类型（热改后目录删了条目的历史意图）：不加卡、不报错，保持原文
+// 渲染（票 04 ③），不凭空编造启发式与止损线。
 func intentTypeCard(vulnType, proof string) string {
 	name := strings.TrimSpace(vulnType)
 	if name == "" {
@@ -350,7 +349,7 @@ func intentTypeCard(vulnType, proof string) string {
 	const discipline = "\n【纪律】类型已在规划期确定，不得改报其他类型；拿不出上述证明物就不成立，不要报 finding——把已试手段与观察写进 record_fact（传本意图 id）。"
 	e, ok := srcCatalog().lookup(name)
 	if !ok {
-		return "\n\n【本类标准卡】\n【本方向的漏洞类型】" + name + discipline
+		return ""
 	}
 	card := "\n\n【本类标准卡（动手前按卡证明，拿不出证明物不成立）】" +
 		"\n【本方向的漏洞类型】" + e.Name

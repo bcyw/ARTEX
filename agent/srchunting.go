@@ -81,10 +81,16 @@ func (c srcTypeCatalog) fold(vulnclass string) string {
 }
 
 // srcCatalog 现读现解析当前标准文本（热载文件优先，回退内嵌默认）的类型目录。
-// 不缓存：改文件下一次调用即生效；块缺失时 srcAcceptance() 已回退内嵌默认，
-// 仍能解析出默认目录。任何非法行跳过不失败。
+// 不缓存：改文件下一次调用即生效；块缺失时仅目录回退内嵌默认，
+// 自定义正文保持不变。任何非法行跳过不失败。
 func srcCatalog() srcTypeCatalog {
-	return parseSrcTypes(srcAcceptance())
+	text := srcAcceptance()
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == srcTypesFence {
+			return parseSrcTypes(text)
+		}
+	}
+	return parseSrcTypes(srcAcceptanceDefault)
 }
 
 // parseSrcTypes 从标准文本提取第一个 ~~~types 围栏块并构建目录。
@@ -180,8 +186,7 @@ type srcHuntingFocus struct {
 }
 
 // srcHunting 由目录派生旧三量接口（finding_cap / findingTypeCounts 等仍消费）。
-// 目录缺失时返回零词表 + 默认上限：一切写法自成一桶照常计数、绝不拒收，上限
-// 仍按默认值生效——词表缺失不构成放水或堵死的理由。
+// 目录块缺失时由 srcCatalog 回退内嵌默认；未知写法自成一桶照常计数。
 func srcHunting() srcHuntingFocus {
 	c := srcCatalog()
 	f := srcHuntingFocus{Fold: map[string]string{}, Cap: c.Cap}

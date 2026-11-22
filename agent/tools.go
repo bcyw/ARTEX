@@ -1489,23 +1489,46 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			return actool.Errorf("severity 必须为 critical / high / medium / low 之一（按 SRC 定级纪律选择：拿不准降级不升级）"), nil
 		}
 		// 类型归属校验（票 01，取代旧版 SRC 黑名单硬闸）：目录（~~~types）是
-		// 类型归属唯一机器来源。规则①意图锚定：意图带 vuln_type 时用它兜底/校验；
+		// 类型归属唯一机器来源。规则①意图锚定：worker 当前意图（ownerNode，
+		// 意图节点）的类型是硬锚——省略 intent_id 时沿用其类型，显式填写须与它
+		// 同桶，改指其他意图也不能绕过；无当前意图时按传入 intent_id 兜底。
 		// 规则②范围规则：collect:false 明确拒收并引用其 stop 文案；规则③目录外
 		// 未知类型放行（词表不堵死新类型）。校验通过后落库统一用规范名。
 		catalog := srcCatalog()
 		vulnClass := a.VulnClass
-		if iid := pid(a.IntentID); iid > 0 {
-			if node, err := t.ts.GetNodeWithSources(iid); err == nil && node != nil {
+		intentType, intentProof := "", ""
+		resolveIntentType := func(id int64) {
+			if intentType != "" {
+				return
+			}
+			if node, err := t.ts.GetNodeWithSources(id); err == nil && node != nil && node.Kind == db.KindIntent {
 				var ip map[string]any
 				if json.Unmarshal(node.Payload, &ip) == nil {
-					if intentType, _ := ip["vuln_type"].(string); intentType != "" {
-						if vulnClass == "" {
-							vulnClass = intentType
-						} else if catalog.fold(vulnClass) != catalog.fold(intentType) {
-							return actool.Errorf(fmt.Sprintf("类型归属不符：本次意图的类型是「%s」，上报的 vulnclass 是「%s」。请补强已有 finding（同根因不另立报）或 record_fact 记录观察，不要改报类型", intentType, a.VulnClass)), nil
-						}
+					if v, _ := ip["vuln_type"].(string); v != "" {
+						intentType = v
+						intentProof, _ = ip["proof"].(string)
 					}
 				}
+			}
+		}
+		if t.ownerNode > 0 {
+			resolveIntentType(t.ownerNode)
+		}
+		if intentType == "" {
+			if iid := pid(a.IntentID); iid > 0 {
+				resolveIntentType(iid)
+			}
+		}
+		if intentType != "" {
+			if vulnClass == "" {
+				vulnClass = intentType
+			} else if catalog.fold(vulnClass) != catalog.fold(intentType) {
+				if intentProof == "" {
+					if e, ok := catalog.lookup(intentType); ok {
+						intentProof = e.Proof
+					}
+				}
+				return actool.Errorf(fmt.Sprintf("类型归属不符：本次意图的类型是「%s」（拿什么算数：%s），上报的 vulnclass 是「%s」。请补强已有 finding（同根因不另立报）或 record_fact 记录观察，不要改报类型", intentType, intentProof, a.VulnClass)), nil
 			}
 		}
 		if entry, ok := catalog.lookup(vulnClass); ok && !entry.Collect {

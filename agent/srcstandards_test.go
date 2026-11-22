@@ -75,6 +75,10 @@ func TestSrcAcceptanceOverridePath(t *testing.T) {
 	if got := srcAcceptance(); got != custom {
 		t.Fatalf("override 未生效: got %q", got)
 	}
+	// 旧版自定义正文缺少目录块时，机器目录仍使用内嵌默认。
+	if catalog := srcCatalog(); len(catalog.Entries) == 0 {
+		t.Fatal("缺少类型目录块的标准文件未回退默认目录")
+	}
 	// 不存在的路径 → 回退内嵌默认
 	SrcAcceptancePath(dir + "/missing.md")
 	if got := srcAcceptance(); !strings.Contains(got, "SRC 漏洞收取标准") {

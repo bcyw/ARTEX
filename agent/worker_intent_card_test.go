@@ -61,17 +61,12 @@ func TestRenderIntentTaskProofOverride(t *testing.T) {
 	}
 }
 
-// TestRenderIntentTaskUnknownTypeDegrades 锁目录外类型（热载文件被改坏/历史意图
-// 指向已删条目）：不 panic，卡片退化为原值 + 通用纪律，仍可执行。
-func TestRenderIntentTaskUnknownTypeDegrades(t *testing.T) {
-	render := renderIntentTask(intentNode(5, `{"summary":"历史意图","vuln_type":"目录外新类型XYZ"}`))
-	for _, want := range []string{"【本类标准卡", "【本方向的漏洞类型】目录外新类型XYZ", "【纪律】", "record_fact"} {
-		if !strings.Contains(render, want) {
-			t.Errorf("退化卡片缺少 %q\n---\n%s", want, render)
-		}
-	}
-	if strings.Contains(render, "【触发启发式】") || strings.Contains(render, "【止损线】") {
-		t.Errorf("目录外类型不应凭空编造启发式/止损线\n---\n%s", render)
+// TestRenderIntentTaskUnknownTypeKeepsOriginal 历史类型已从目录删除时保留任务原文，不加卡。
+func TestRenderIntentTaskUnknownTypeKeepsOriginal(t *testing.T) {
+	payload := `{"summary":"历史意图","vuln_type":"目录外新类型XYZ"}`
+	render := renderIntentTask(intentNode(5, payload))
+	if strings.Contains(render, "本类标准卡") || !strings.Contains(render, payload) || !strings.Contains(render, "意图 id: 5") {
+		t.Fatalf("未知历史类型应保留原文且不加标准卡: %s", render)
 	}
 }
 
