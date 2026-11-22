@@ -9,7 +9,7 @@ description: 授权范围内的 SRC 漏洞验证、Web/API 安全测试、白盒
 
 ## 边界与路由
 
-先读 [研究边界](rules/security-research-context.md)。已明确的范围内自主推进，不重复盘问身份材料；范围不明时先做公开资料或本地代码分析，只澄清影响实际测试的边界。
+先读 [研究边界](rules/security-research-context.md)。做 SRC 类型选择、验证或上报时，先读工作区 [SRC 收取标准](../../standards/src-acceptance.md) 的类型目录：只从 collect: yes 选择漏洞验证方向，按 proof/signals/stop 取证止损，collect: no 只记事实；规划意图声明 vuln_type，执行时按本类标准卡证明，上报与意图类型锚定。已明确的范围内自主推进，不重复盘问身份材料；范围不明时先做公开资料或本地代码分析，只澄清影响实际测试的边界。
 
 | 任务 | 按需读取 |
 |---|---|
@@ -39,7 +39,7 @@ description: 授权范围内的 SRC 漏洞验证、Web/API 安全测试、白盒
 | Agent 工具或云 IDE RPC | [工具执行边界](知识库/agent-tool-exec-test.md)、[云 IDE](知识库/cloud-ide-codex-rce-chain.md) |
 | 有差分的测试被 WAF 拦截 | [WAF](知识库/waf-bypass.md) |
 
-知识库是方法参考，不覆盖研究边界、实际授权和用户当次要求。现有 SRC 偏好排除 CORS，见 [CORS 偏好](rules/cors-vuln-report-priority.md)。
+知识库是方法参考，选用模块前先按类型目录确认可收性；方法覆盖不等于可收类型或测试授权。类型范围以收取标准目录为准，边界服从实际授权和用户当次要求。
 
 ## 完成
 
