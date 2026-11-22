@@ -332,7 +332,10 @@ func renderWorkerGraphOverview(data map[string]any) string {
 	// 专属的新 map，删键不影响 planner。
 	// 类型分布（finding_type_counts）与 coverage 同理：是规划者「往哪个方向再平衡」的
 	// 决策信号，worker 只做领到的意图、只从提示纪律感知触顶规则文字 → 一并剔除。
+	// type_coverage（按目录的覆盖空白表）同样只服务规划排期，worker 看到只会想「顺手探
+	// 别的类」，越出「只做这一条意图」的边界 → 一并剔除。
 	delete(data, "finding_type_counts")
+	delete(data, "type_coverage")
 	delete(data, "coverage")
 	b, err := json.Marshal(data)
 	if err != nil {
