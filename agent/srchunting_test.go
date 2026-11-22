@@ -7,9 +7,8 @@ import (
 	"testing"
 )
 
-// TestHuntingFocusGuidanceInjection 锁「挖掘方向」节随收取标准同机制注入
-// guidance（票 01：节文本进 agent 提示，七类规范类型名 + 越权 + 触发启发式 +
-// 同类上限 + 折叠表 + 可收性×危害优先级说明）。
+// TestHuntingFocusGuidanceInjection 锁「挖掘方向」节 + 文末「机器可查目录」
+// 随收取标准同机制注入 guidance（票 01：目录块是类型归属与上限的唯一机器来源）。
 func TestHuntingFocusGuidanceInjection(t *testing.T) {
 	g := findingGuidanceWithStandards("")
 	for _, want := range []string{
@@ -17,35 +16,66 @@ func TestHuntingFocusGuidanceInjection(t *testing.T) {
 		"注入类", "命令执行与反序列化", "SSRF", "认证绕过与账户接管",
 		"存储型 XSS", "文件上传 getshell", "业务逻辑",
 		"越权", "同类上限", "别名折叠", "自成一桶", "绝不拒收",
+		"机器可查目录", "~~~types",
 	} {
 		if !strings.Contains(g, want) {
-			t.Errorf("guidance 缺少挖掘方向节内容: %q", want)
+			t.Errorf("guidance 缺少收取标准内容: %q", want)
 		}
 	}
 }
 
-// TestSrcHuntingFocusDefaults 锁机器可查三量的默认值：规范名清单（优先级序，
-// 七类在前、越权垫底）、折叠映射、同类上限默认 3。默认文本与热载文件语义同步
-// 维护，此处跑的是内嵌默认（单测环境无路径覆盖）。
-func TestSrcHuntingFocusDefaults(t *testing.T) {
-	f := srcHunting()
-	wantTypes := []string{
+// TestSrcTypeCatalogDefaults 锁机器可查目录的默认值：8 个 collect: yes 类型
+// 按书写序在前、明确不收类型在后，同类上限默认 3，每条都有证明物、
+// collect: no 条目都有止损文案（上报被拒时引用）。
+func TestSrcTypeCatalogDefaults(t *testing.T) {
+	c := srcCatalog()
+	wantCollect := []string{
 		"注入类", "命令执行与反序列化", "SSRF", "认证绕过与账户接管",
 		"存储型 XSS", "文件上传 getshell", "业务逻辑", "越权",
 	}
-	if len(f.Types) != len(wantTypes) {
-		t.Fatalf("规范名清单长度 = %d, want %d (%v)", len(f.Types), len(wantTypes), f.Types)
+	if c.Cap != 3 {
+		t.Errorf("同类上限 = %d, want 3", c.Cap)
 	}
-	for i, want := range wantTypes {
-		if f.Types[i] != want {
-			t.Errorf("规范名清单[%d] = %q, want %q", i, f.Types[i], want)
+	if len(c.Entries) < len(wantCollect) {
+		t.Fatalf("目录条目 %d 条，少于可收类型 %d 条", len(c.Entries), len(wantCollect))
+	}
+	for i, want := range wantCollect {
+		e := c.Entries[i]
+		if e.Name != want {
+			t.Errorf("目录[%d].Name = %q, want %q", i, e.Name, want)
+		}
+		if !e.Collect {
+			t.Errorf("目录[%d] %q 应为 collect: yes", i, e.Name)
 		}
 	}
-	if f.Cap != 3 {
-		t.Errorf("同类上限 = %d, want 3", f.Cap)
+	for i, e := range c.Entries {
+		if e.Proof == "" {
+			t.Errorf("目录[%d] %q 缺少 proof（危害最小证明物）", i, e.Name)
+		}
+		if i >= len(wantCollect) && e.Collect {
+			t.Errorf("目录[%d] %q 应为 collect: no（排在可收类型之后）", i, e.Name)
+		}
+		if !e.Collect && e.Stop == "" {
+			t.Errorf("目录[%d] %q 缺少 stop 拒收文案", i, e.Name)
+		}
+	}
+	// 派生视图与目录同源：Types 覆盖全部条目、Fold 非空、Cap 同步。
+	f := srcHunting()
+	if len(f.Types) != len(c.Entries) {
+		t.Errorf("派生 Types 长度 = %d, want %d", len(f.Types), len(c.Entries))
 	}
 	if len(f.Fold) == 0 {
-		t.Fatal("折叠映射为空")
+		t.Fatal("派生 Fold 为空")
+	}
+	if f.Cap != c.Cap {
+		t.Errorf("派生 Cap = %d, want %d", f.Cap, c.Cap)
+	}
+	// 明确不收的类型必须可被 lookup 命中且 Collect=false（上报期拒收依据）。
+	for _, name := range []string{"短信轰炸与无频控发码", "仅凭状态码报错响应差异", "理论 IDOR 无数据证明"} {
+		e, ok := c.lookup(name)
+		if !ok || e.Collect {
+			t.Errorf("lookup(%q) = %+v, %v; want 命中且 collect: no", name, e, ok)
+		}
 	}
 }
 
@@ -100,6 +130,11 @@ func TestSrcFoldVulnClass(t *testing.T) {
 		{"垂直越权", "越权"},
 		{"unauth", "越权"},
 		{"未授权", "越权"},
+		// 明确不收类型也折叠到规范桶（上报期据此拒收）。
+		{"短信轰炸", "短信轰炸与无频控发码"},
+		{"sms_bombing", "短信轰炸与无频控发码"},
+		{"仅凭状态码", "仅凭状态码报错响应差异"},
+		{"理论IDOR", "理论 IDOR 无数据证明"},
 		// 表未覆盖的新写法：以归一形自成一桶，不拒收。
 		{"GraphQL 滥用", "graphql滥用"},
 		{"graphql_abuse", "graphqlabuse"},
@@ -125,8 +160,8 @@ func TestSrcFoldVulnClass(t *testing.T) {
 	}
 }
 
-// TestSrcHuntingOverrideAndHotReload 锁热载与容错（票 01 验收：节改动后重启
-// 进程即生效；自定义平台口径无机器可查区时优雅回退——零词表 + 默认上限，
+// TestSrcHuntingOverrideAndHotReload 锁热载与容错（票 01 验收：目录块改动后
+// 重启进程即生效；自定义平台口径无机器可查区时优雅回退——零词表 + 默认上限，
 // 一切写法自成一桶，绝不拒收）。
 func TestSrcHuntingOverrideAndHotReload(t *testing.T) {
 	dir := t.TempDir()
@@ -141,13 +176,22 @@ func TestSrcHuntingOverrideAndHotReload(t *testing.T) {
 	defer SrcAcceptancePath("")
 
 	// 自定义机器可查区：cap 与词表都按文件走。
-	write("自定义标准正文\n\n~~~hunting\ncap: 5\n甲类: foo bar\n~~~\n")
-	f := srcHunting()
-	if f.Cap != 5 {
-		t.Errorf("自定义 cap = %d, want 5", f.Cap)
+	write("自定义标准正文\n\n~~~types\ncap: 5\ntype: 甲类\ncollect: yes\naliases: foo bar\nproof: 证明甲\nsignals: 信号甲\nstop: 止损甲\n\ntype: 乙类\ncollect: no\naliases: baz\nproof: 证明乙\nsignals: 信号乙\nstop: 止损乙\n~~~\n")
+	c := srcCatalog()
+	if c.Cap != 5 {
+		t.Errorf("自定义 cap = %d, want 5", c.Cap)
 	}
-	if len(f.Types) != 1 || f.Types[0] != "甲类" {
-		t.Errorf("自定义规范名清单 = %v, want [甲类]", f.Types)
+	if len(c.Entries) != 2 {
+		t.Fatalf("自定义目录条目 = %d, want 2", len(c.Entries))
+	}
+	if c.Entries[0].Name != "甲类" || !c.Entries[0].Collect {
+		t.Errorf("条目[0] = %+v, want 甲类/collect: yes", c.Entries[0])
+	}
+	if c.Entries[1].Name != "乙类" || c.Entries[1].Collect {
+		t.Errorf("条目[1] = %+v, want 乙类/collect: no", c.Entries[1])
+	}
+	if c.Entries[1].Stop != "止损乙" {
+		t.Errorf("collect: no 条目 stop = %q, want 止损乙", c.Entries[1].Stop)
 	}
 	if got := srcFoldVulnClass("BAR"); got != "甲类" {
 		t.Errorf("自定义别名折叠 BAR = %q, want 甲类", got)
@@ -155,39 +199,42 @@ func TestSrcHuntingOverrideAndHotReload(t *testing.T) {
 	if got := srcFoldVulnClass("FOO"); got != "甲类" {
 		t.Errorf("别名大小写变体折叠 = %q, want 甲类", got)
 	}
+	if got := srcFoldVulnClass("BAZ"); got != "乙类" {
+		t.Errorf("collect: no 别名折叠 BAZ = %q, want 乙类", got)
+	}
 
 	// 热改：改文件后下一次调用即生效（比重启更宽松，重启天然满足）。
-	write("自定义标准正文\n\n~~~hunting\ncap: 7\n甲类: foo\n乙类: baz\n~~~\n")
-	f = srcHunting()
+	write("自定义标准正文\n\n~~~types\ncap: 7\ntype: 甲类\ncollect: yes\naliases: foo\nproof: p\n\ntype: 丙类\ncollect: yes\naliases: qux\nproof: p\n~~~\n")
+	f := srcHunting()
 	if f.Cap != 7 {
 		t.Errorf("热改后 cap = %d, want 7", f.Cap)
 	}
-	if len(f.Types) != 2 || f.Types[0] != "甲类" || f.Types[1] != "乙类" {
-		t.Errorf("热改后规范名清单 = %v, want [甲类 乙类]", f.Types)
+	if len(f.Types) != 2 || f.Types[0] != "甲类" || f.Types[1] != "丙类" {
+		t.Errorf("热改后规范名清单 = %v, want [甲类 丙类]", f.Types)
 	}
 
 	// 无机器可查区的自定义标准：回退零词表 + 默认上限 3，不拒收。
 	write("只有正文，没有机器可查区\n")
-	f = srcHunting()
-	if f.Cap != srcHuntingCapDefault {
-		t.Errorf("无块时 cap = %d, want 默认 %d", f.Cap, srcHuntingCapDefault)
+	c = srcCatalog()
+	if c.Cap != srcHuntingCapDefault {
+		t.Errorf("无块时 cap = %d, want 默认 %d", c.Cap, srcHuntingCapDefault)
 	}
-	if len(f.Types) != 0 || len(f.Fold) != 0 {
-		t.Errorf("无块时词表应为空, got types=%v fold=%v", f.Types, f.Fold)
+	if len(c.Entries) != 0 {
+		t.Errorf("无块时目录应为空, got %v", c.Entries)
 	}
 	if got := srcFoldVulnClass("任意新写法"); got != "任意新写法" {
 		t.Errorf("无块时折叠 = %q, want 自成一桶", got)
 	}
 
-	// 容错：非法 cap 行、无冒号行、空键行、无别名行一律跳过，块整体仍可解析；
-	// 多个合法 cap 行以最后为准（热改口径语义）。
-	write("~~~hunting\ncap: abc\ncap: -1\ncap: 2\n没有冒号的行\n: 空键\n乙类: \n~~~\n")
-	f = srcHunting()
-	if f.Cap != 2 {
-		t.Errorf("容错后 cap = %d, want 2（非法行忽略、合法行取最后）", f.Cap)
+	// 容错：非法 cap、无冒号行、空键行、空 type 名、未知键一律跳过，块整体仍
+	// 可解析；多个合法 cap 行以最后为准（热改口径语义）。
+	write("~~~types\ncap: abc\ncap: -1\ncap: 2\n没有冒号的行\n: 空键\ntype: \nunknown_key: x\ntype: 乙类\ncollect: no\nstop: 止损\n~~~\n")
+	c = srcCatalog()
+	if c.Cap != 2 {
+		t.Errorf("容错后 cap = %d, want 2（非法行忽略、合法行取最后）", c.Cap)
 	}
-	if len(f.Types) != 1 || f.Types[0] != "乙类" {
-		t.Errorf("容错后规范名清单 = %v, want [乙类]", f.Types)
+	if len(c.Entries) != 1 || c.Entries[0].Name != "乙类" {
+		t.Errorf("容错后目录 = %+v, want [乙类]", c.Entries)
 	}
 	if got := srcFoldVulnClass("乙类"); got != "乙类" {
 		t.Errorf("无别名桶自身写法应命中本桶, got %q", got)

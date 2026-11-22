@@ -12,14 +12,11 @@ import (
 //  - 标准以【代码固定注入段】的形式拼进 guidance（findingWorkflowTools 返回值 →
 //    deferredSystem 拼进系统提示），而 NOT 改各 agent 的 DB 可编辑模板 —— 这样
 //    用户在 UI 里改过的提示词不会被覆盖，质量纪律也永远不会被编辑掉（Q10-C）。
-//  - 黑名单在 addFinding() 做入库硬闸：声明字段（vulnclass/name/summary）命中
-//    且无升级证据的照常入库但 status='quarantined'（隔离区，可在页面人工
-//    检查/放行），不进交付报告（报告只取 confirmed）。
 //  - 标准正文可被仓库外文件覆盖：SrcAcceptancePath 指向的文件存在则优先读它，
 //    方便按不同 SRC 平台换口径而无需重新编译。
-//
-// 硬闸匹配范围（见 SrcFindingBlocked 注释）：类型判定只看声明字段，evidence/
-// description 里的上下文性提及（如「已排除点击劫持」）不参与，防止误杀合法漏洞。
+//  - 类型归属、同类上限与折叠映射的唯一机器来源是正文末尾的「机器可查目录」
+//    （~~~types 围栏块），由 agent/srchunting.go 现读现解析；正文其余章节是
+//    人类可读说明，不改机器语义。
 
 // srcAcceptanceDefault 内嵌默认标准（与 standards/src-acceptance.md 同步维护）。
 // 保留在代码里的原因：go run / 单测 / 未随包分发 standards 目录的场景下仍然生效。
@@ -33,7 +30,7 @@ const srcAcceptanceDefault = `**SRC 漏洞收取标准（宁缺毋滥——最�
 密钥例外：真实密钥/凭据泄露不受公开性豁免（公开性只豁免无危害信息，不豁免可利用凭据）。
 完成判据：找到未登录可见的正常前端入口拿到同样数据 → 作废；找不到入口且同域基线接口确实拒绝匿名 → 通过。
 
-**黑名单（默认禁止挖掘/上报；命中且无升级证据的，强行上报会被系统拦截进隔离区）**：
+**明确不收类型（默认禁止挖掘/上报；机器侧只读文末目录里 collect: no 的条目，命中即拒收并引导改 record_fact 或换类型）**：
 1. Self-XSS、无敏感操作的反射 XSS——升级条件：反射点位于鉴权/支付/个人资料等敏感页面上下文
 2. 低危 CSRF（改资料类）——升级条件：可触达改绑手机/邮箱、资金、管理等敏感操作
 3. JSONP 劫持、CRLF 无利用面——升级条件：能实际带出敏感数据/完成可演示危害
@@ -68,7 +65,7 @@ const srcAcceptanceDefault = `**SRC 漏洞收取标准（宁缺毋滥——最�
 **查重（上报前必查）**：同一资产 + 同一根因 + 同一接口 + 同一影响面 = 同一漏洞，补强已有 finding，不新写；先查探索图与已有 findings 再上报。
 
 **不挖清单（挖掘阶段直接跳过，不是报不报的问题）**：
-以下方向一开始就不要投入探索——要么不在 SRC 收取范围，要么中间信号成报率极低。发现候选点只允许花 1-2 次请求确认能否升级到链路终局，不能升级立刻放弃并记 fact 转向，不许深挖：
+以下方向一开始就不要投入探索——要么不在 SRC 收取范围，要么中间信号成报率极低。发现候选点只允许花 1-2 次请求确认能否升级到链路终局，不能升级立刻放弃并记 fact 转向，不许深挖（这些方向同步登记为文末目录的 collect: no 条目）：
 1. 用户名/账号/手机号枚举、注册状态/存在性 oracle：响应差异本身不收；只有能继续走到撞库接管、任意密码重置、或枚举产物本身即敏感数据清单时才投入，且投入点在「下一步利用」，不是「再验证几遍差异」。
 2. 短信轰炸/无频控发码：骚扰类危害基本不收；发码接口只在验证码可预测/可绕过（→认证接管链）或发码进入其他高危链（如配合越权改绑）时继续，纯「无频控、可跨号、无图形码」到此为止。
 3. 仅凭状态码/报错/响应差异判定的"漏洞"：403 变 200、500 报错、响应长度/结构不同——都不是漏洞，只是信号；基于差异的候选必须先回答「差异背后的危害是什么」，用数据或操作证明，不能只拿差异本身当结论。
@@ -76,38 +73,184 @@ const srcAcceptanceDefault = `**SRC 漏洞收取标准（宁缺毋滥——最�
 5. 批量注册/垃圾提交/留言污染类：匿名表单可无限提交是设计如此（公开业务流程），不构成危害。
 
 **挖掘方向（探索力气按「可收性 × 危害」分配——优先投入证据门槛清晰、SRC 平台大概率收取的中高危类型；这是方向指引不是验收配额，被留下的漏洞按定级纪律如实定级，挖掘偏好不扭曲验收口径）**：
-以下七类为规范类型名，按优先级排列；上报 vulnclass 按规范名填写，常见英文/机器写法按节末折叠表自动归桶：
+以下七类为规范类型名，按优先级排列；上报 vulnclass 按规范名填写，常见英文/机器写法按文末目录折叠归桶：
 1. **注入类**：SQL/NoSQL/ORM 注入、模板注入（SSTI）、表达式注入（SpEL/OGNL/EL）、XPath/XXE。触发启发式：参数值回显或报错差异、响应时间可操控、返回内容随输入结构变化、模板/表达式/序列化语法被解析。
 2. **命令执行与反序列化**：RCE/命令执行/代码执行、反序列化利用链（Fastjson/Jackson/pickle/phar/ViewState）、定时任务与工作流节点。触发启发式：系统命令拼接、eval 类入口、出现序列化数据特征即优先验证。
 3. **SSRF**：所有接受 URL/域名/IP 的参数（webhook、图片/文件抓取、导入、代理、回调地址），探测内网 + 协议（file/gopher/dict）。触发启发式：URL 参数触发服务端外连，拿到内网实际响应才算。
 4. **认证绕过与账户接管**：JWT/session 伪造、密码重置/验证码逻辑缺陷、OAuth 回调缺陷。触发启发式：任意用户可绕过才算（OAuth/JWT/密码重置要 A/B 双账号证明）。
-5. **存储型 XSS**：内容持久化后在他人生效上下文触发（个人资料/评论/工单），能打到他人 cookie 或管理员；反射型按黑名单 #1 处理（敏感页面上下文可升级）。触发启发式：输入入库后出现在他人可见页面且未编码。
+5. **存储型 XSS**：内容持久化后在他人生效上下文触发（个人资料/评论/工单），能打到他人 cookie 或管理员；反射型按明确不收类型 #1 处理（敏感页面上下文可升级）。触发启发式：输入入库后出现在他人可见页面且未编码。
 6. **文件上传 getshell**：解析漏洞、双后缀、竞态、.htaccess。触发启发式：webshell 可执行才算，纯存储不解析不成立。
 7. **业务逻辑**：支付金额/数量篡改、负数与并发竞态（余额/积分/优惠券）、订单与状态机篡改、越权操作他人资源。触发启发式：操作真实生效且影响他人业务状态，自己测试数据不算。
 
 **越权（合法方向，受同类上限约束）**：水平/垂直越权（IDOR）与未授权敏感数据接口是可收类型，A/B 交叉证明 + 公开性检查通过即如实定级上报。但越权证据门槛最低、最容易扎堆，单任务内同类产出触顶后停止该方向新增投入，把力气转向上表未触顶的类型。
 
-**同类上限（默认 3，本节机器可查区维护）**：单任务内同一规范类型的有效产出（pending + confirmed）达到上限即触顶——继续上报会被拒收并引导补强已有 finding 或改记 fact；已隔离/误报/重复的产出不占名额。触顶是引导信号不是质量否决，规划者应把意图分散到未触顶方向。
+**同类上限（默认 3，文末机器可查目录维护）**：单任务内同一规范类型的有效产出（pending + confirmed）达到上限即触顶——继续上报会被拒收并引导补强已有 finding 或改记 fact；已隔离/误报/重复的产出不占名额。触顶是引导信号不是质量否决，规划者应把意图分散到未触顶方向。
 
-**别名折叠（vulnclass 写法归一）**：任意写法先做机械归一（大小写/空白/连字符），再查下表折叠到规范桶名；**表未覆盖的新写法自成一桶、照常计数、绝不拒收**——新类型（反序列化变体、GraphQL 滥用等）直接写原名即可，词表永不堵死合法新类型。
-
-~~~hunting
-# 机器可查区：Go 侧只读本块构建规范名清单/折叠映射/上限值，改这里重启进程即生效、无需重编译。
-# 行格式：cap: <数字> 或 <规范桶名>: <别名…>（别名空格分隔，大小写/空白/连字符自动归一）。
-cap: 3
-注入类: sql注入 sqli sql_injection nosql注入 nosql_injection ssti 模板注入 xxe xpath注入 表达式注入
-命令执行与反序列化: rce 命令执行 代码执行 命令注入 command_injection deserialization insecure_deserialization 反序列化
-SSRF: ssrf 服务端请求伪造
-认证绕过与账户接管: auth_bypass 认证绕过 authentication_bypass 账户接管 account_takeover login_bypass
-存储型 XSS: stored_xss 存储xss 存储型xss xss_stored
-文件上传 getshell: file_upload 文件上传 upload_getshell webshell getshell 任意文件上传
-业务逻辑: business_logic 业务逻辑 逻辑漏洞 支付逻辑 竞态 条件竞争
-越权: idor 越权 水平越权 垂直越权 unauth 未授权 unauthorized broken_access_control
-~~~
+**别名折叠（vulnclass 写法归一）**：任意写法先做机械归一（大小写/空白/连字符），再查文末目录折叠到规范名；**目录未覆盖的新写法自成一桶、照常计数、绝不拒收**——新类型（反序列化变体、GraphQL 滥用等）直接写原名即可，词表永不堵死合法新类型。
 
 **定级纪律**：定级锚 SRC 平台体系（严重/高/中/低），不写 CVSS 分数；无 exploit 评分封顶【中】。critical=RCE/拖库/直接获取大量真实用户数据/核心账户接管；high=存储 XSS/越权批量数据访问/支付逻辑漏洞；medium=单用户越权/反射 XSS（升级后）/多条件串联泄露；low=前三类都不适用但确有真实危害。拿不准降级不升级，实在拿不准记 fact 交人工判断。
 
-**复测纪律**：复测结论 reproduced 才算有效佐证；连续 2 次复测无法复现 → 标记 false_positive。traffic_refs 中已含完整利用响应（proof 角色）的，视为已具备完整利用证据。报告必须附验证证据（原始请求/响应原文，经 traffic 绑定）——平台对 AI 生成且无验证证据的报告直接驳回。`
+**复测纪律**：复测结论 reproduced 才算有效佐证；连续 2 次复测无法复现 → 标记 false_positive。traffic_refs 中已含完整利用响应（proof 角色）的，视为已具备完整利用证据。报告必须附验证证据（原始请求/响应原文，经 traffic 绑定）——平台对 AI 生成且无验证证据的报告直接驳回。
+
+**机器可查目录（类型归属与上限的唯一机器来源）**：
+本块是 Go 侧读取的唯一机器来源，改这里重启进程即生效、无需重编译。正文的明确不收类型、不挖清单、挖掘方向只做人类可读说明，若与目录冲突以目录为准。行格式：cap: <数字> 全局同类上限（缺省 3）；type: <规范名> 开启一条类型，collect: yes 可收（受同类上限约束）/ collect: no 明确不收（上报被拒收）；aliases: <别名…> 空格分隔的单 token 别名（折叠时抹掉空白/大小写/连字符，每个别名内部不要带空格）；proof: 危害最小证明物；signals: 触发启发式；stop: 止损线（collect: no 条目的拒收文案来源）。
+
+~~~types
+cap: 3
+type: 注入类
+collect: yes
+aliases: sql注入 sqli sql_injection nosql注入 nosql_injection ssti 模板注入 xxe xpath注入 表达式注入 orm注入
+proof: 注出一条真实数据（最低共识 = 注出库名 database()；盲注需时间差 + 库名内容）；仅报错关键词不算
+signals: 参数值回显或报错差异、响应时间可操控、返回内容随输入结构变化、模板/表达式/序列化语法被解析
+stop: 拿不出真实数据证明物即不成立，改记 fact
+
+type: 命令执行与反序列化
+collect: yes
+aliases: rce 命令执行 代码执行 命令注入 command_injection deserialization insecure_deserialization 反序列化 fastjson jackson pickle phar viewstate
+proof: 真实命令执行实证（能执行命令本身就是危害）
+signals: 系统命令拼接、eval 类入口、出现序列化数据特征即优先验证
+stop: 只有序列化特征无执行实证不成立，改记 fact
+
+type: SSRF
+collect: yes
+aliases: ssrf 服务端请求伪造 server_side_request_forgery
+proof: 服务端发出 + 回显内网数据（云元数据/内网 banner/内网页面）；仅 DNSlog = 理论可行不收
+signals: URL 参数触发服务端外连，拿到内网实际响应才算
+stop: 仅 DNSlog 出网无回显不成立，改记 fact
+
+type: 认证绕过与账户接管
+collect: yes
+aliases: auth_bypass 认证绕过 authentication_bypass 账户接管 account_takeover login_bypass jwt伪造 session伪造 密码重置 验证码绕过
+proof: 任意用户可绕过；OAuth/JWT/密码重置要 A/B 双账号证明
+signals: 任意用户可绕过才算（OAuth/JWT/密码重置要 A/B 双账号证明）
+stop: 只能登自己号不算绕过，改记 fact
+
+type: 存储型 XSS
+collect: yes
+aliases: stored_xss 存储xss 存储型xss xss_stored
+proof: webshell 可执行或存储型 XSS 真实触发；纯存储不解析不成立
+signals: 输入入库后出现在他人可见页面且未编码
+stop: 仅自触发不危害他人不成立，改记 fact
+
+type: 文件上传 getshell
+collect: yes
+aliases: file_upload 文件上传 upload_getshell webshell getshell 任意文件上传 解析漏洞
+proof: webshell 可执行或存储型 XSS 真实触发；纯存储不解析不成立
+signals: webshell 可执行才算，纯存储不解析不成立
+stop: 纯存储不解析不成立，改记 fact
+
+type: 业务逻辑
+collect: yes
+aliases: business_logic 业务逻辑 逻辑漏洞 支付逻辑 竞态 条件竞争 支付绕过 金额篡改 负数下单
+proof: 操作真实生效且影响他人业务状态；自己测试数据不算
+signals: 操作真实生效且影响他人业务状态，自己测试数据不算
+stop: 只影响自己测试数据不成立，改记 fact
+
+type: 越权
+collect: yes
+aliases: idor 越权 水平越权 垂直越权 unauth 未授权 unauthorized broken_access_control
+proof: A/B 交叉证明（A 的资源 B 的 token 能读/改，B 返回非空且等于 owner 视图内容）+ 公开性检查通过
+signals: 只读到自己不算；B 返回空且等于 owner 视图内容才算
+stop: 只读到自己或过不了公开性检查不成立，改记 fact
+
+type: 反射型 XSS 与 Self-XSS
+collect: no
+aliases: 反射xss 反射型xss reflected_xss reflect_xss xss_reflected self_xss selfxss self型xss
+proof: 反射点位于鉴权/支付/个人资料等敏感页面上下文（升级条件）
+signals: 反射点在敏感页面上下文才可升级为存储型 XSS 或敏感反射
+stop: 无敏感操作的反射 XSS 与 Self-XSS 不成报，改记 fact；敏感上下文请改报存储型 XSS
+
+type: 低危 CSRF
+collect: no
+aliases: csrf 跨站请求伪造
+proof: CSRF 可触达敏感操作（改绑手机/邮箱、资金操作、管理操作）
+signals: 可触达改绑/资金/管理等敏感操作才算
+stop: 改资料类低危 CSRF 不成报，改记 fact；触达敏感操作请改报对应越权/账户接管
+
+type: JSONP 劫持与 CRLF 无利用面
+collect: no
+aliases: jsonp jsonp劫持 crlf header_injection
+proof: 能实际带出敏感数据 / 完成可演示的危害
+signals: 能带出敏感数据或完成可演示危害才算
+stop: 无利用面的 JSONP/CRLF 不成报，改记 fact；能带出数据请改报数据泄露
+
+type: 信息泄露无进一步利用
+collect: no
+aliases: 目录列表 目录浏览 git泄露 git目录 备份文件泄露 备份泄露 phpinfo 源码泄露 源代码泄露 堆栈泄露 调试信息泄露 swagger泄露 接口文档泄露 directory_listing git_exposure source_leak stack_trace debug_info
+proof: 从泄露内容实际还原出可利用物（如源码→拿到注入点/凭据）
+signals: 从泄露内容实际还原出可利用物才算
+stop: 报错/目录列表/.git/phpinfo 本身不是危害，改记 fact；还原出利用物请改报对应可收类型
+
+type: 弱口令与默认口令
+collect: no
+aliases: 弱口令 默认口令 weak_password default_credential default_password weak_credential
+proof: 登录的是高权账户或可横向影响
+signals: 高权账户或可横向影响才算
+stop: 弱口令/默认口令不成报，改记 fact；高权登录请改报账户接管
+
+type: 端口指纹版本披露
+collect: no
+aliases: 端口扫描 版本披露 指纹识别 指纹泄露 port_scan port_disclosure version_disclosure fingerprint
+proof: 无（一票否决）
+signals: 无
+stop: 端口/指纹/版本披露本身不是危害，改记 fact 供后续利用，永不成报
+
+type: 点击劫持与 iframe 嵌套
+collect: no
+aliases: 点击劫持 iframe嵌套 clickjacking iframe_clickjacking ui_redressing
+proof: 无（一票否决）
+signals: 无
+stop: 点击劫持/iframe 嵌套不成报，改记 fact
+
+type: 用户账号手机号枚举
+collect: no
+aliases: 用户名枚举 账号枚举 账号存在性 手机号枚举 手机号存在性 username_enumeration user_enumeration phone_enumeration mobile_enumeration
+proof: 从枚举实际走到接管（撞库成功登录他人账号）或批量泄露的用户清单本身即敏感数据
+signals: 从枚举走到接管或枚举产物本身即敏感清单才算
+stop: 响应差异枚举本身不是危害，改记 fact；走到接管请改报账户接管
+
+type: 短信轰炸与无频控发码
+collect: no
+aliases: 短信轰炸 骚扰短信 短信骚扰 轰炸短信 无限发短信 sms_bombing sms_bomb sms_flood sms_flooding
+proof: 从发码链实际走到任意账户接管或真实资损
+signals: 发码链走到接管或资损才算
+stop: 仅无频控/匿名可发/可跨号下发均不成报，改记 fact；走到接管请改报账户接管
+
+type: 仅凭状态码报错响应差异
+collect: no
+aliases: 仅凭状态码 仅状态码 仅凭响应差异 仅响应差异 仅凭报错差异 状态码差异即漏洞 报错差异即漏洞
+proof: 从差异实际还原出数据或完成操作（盲注需时间差 + 数据内容）
+signals: 从差异还原出数据或操作才算
+stop: 差异本身永远不是危害，改记 fact；还原出数据/操作请改报对应可收类型
+
+type: 无回显 SSRF
+collect: no
+aliases: 无回显ssrf ssrf无回显 仅dnslog dnslog出网 ssrf仅出网 blind_ssrf
+proof: 拿到内网实际响应内容并可进一步操作
+signals: 拿到内网实际响应才算
+stop: 仅 DNSlog 出网无回显不成报，改记 fact；拿到回显请改报 SSRF
+
+type: 理论 IDOR 无数据证明
+collect: no
+aliases: 理论idor 理论越权 可能存在越权 疑似越权 推测越权 theoretical_idor
+proof: 展示了他人真实数据记录
+signals: 展示他人真实数据记录才算
+stop: 仅理论/疑似越权不成报，改记 fact；展示他人数据请改报越权
+
+type: 未授权接口无敏感数据
+collect: no
+aliases: 可能存在未授权 疑似未授权
+proof: 返回字段含手机号/订单/身份等业务敏感数据，且该接口非公开页面数据源（过公开性检查）
+signals: 返回敏感数据且过公开性检查才算
+stop: 未授权但无敏感数据不成报，改记 fact；返回敏感数据请改报越权
+
+type: 批量注册与垃圾提交
+collect: no
+aliases: 批量注册 垃圾提交 留言污染 批量提交
+proof: 无（公开业务流程，设计如此）
+signals: 无
+stop: 匿名表单可无限提交是设计如此，不构成危害，改记 fact
+~~~`
 
 var (
 	srcAcceptanceMu   sync.RWMutex
@@ -140,10 +283,6 @@ func srcAcceptance() string {
 	return srcAcceptanceDefault
 }
 
-// srcQuarantineNote 是 guidance 里对硬闸行为的说明：黑名单命中会被拦截进隔离区，
-// 提前告知可以减少 agent 硬闯被拒后的重试空转。
-const srcQuarantineNote = "\n\n黑名单命中且无升级证据的上报会被系统拦截进隔离区（quarantined，可在页面人工检查/放行）。这不是「写对暗号就能过」的关卡：拿不出对应的升级证据就说明该方向当前不成立，改记 inferred 事实并转其他方向，不要为放行而包装措辞。"
-
 // srcHighRiskHunting 是中高危挖掘的行为纪律（常驻注入，与收取标准同文件——同为
 // 「产出什么漏洞」的纪律）。类型优先级清单【不在这里】：它活在上方收取标准的
 // 「挖掘方向」节（热载、免重编译可调），本常量只保留类型中性的纪律层——单一事实源，
@@ -159,153 +298,5 @@ const srcHighRiskHunting = `
 // acceptance standard. Only agents that can actually produce findings
 // (report_finding) get the full discipline; read-only roles are untouched.
 func findingGuidanceWithStandards(guidance string) string {
-	return guidance + "\n\n" + srcAcceptance() + srcQuarantineNote + srcHighRiskHunting
-}
-
-// --- 黑名单匹配（addFinding 硬闸用） ---
-
-// srcFlat 把文本压成关键词匹配用的连写形：小写、去掉空白与 _ - 分隔符。
-// 「username_enumeration」「reflected-xss」「反射 XSS」与自然语言写法同形匹配，
-// 字段之间由调用方拼 \x00 分隔防止跨字段误拼出关键词。
-func srcFlat(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case ' ', '\t', '\r', '\n', '_', '-':
-			return -1
-		}
-		return r
-	}, strings.ToLower(s))
-}
-
-// srcHardVetoVulnClasses 是无升级条件的一票否决类（标准 #8/#9：端口/指纹/
-// 版本披露、点击劫持）——写再多「升级证据」也不放行。
-var srcHardVetoVulnClasses = []string{
-	"version_disclosure", "fingerprint", "port_scan", "port_disclosure",
-	"clickjacking", "iframe_clickjacking",
-}
-
-// srcHardVetoKeywords 与上表对应的中文关键词（只收不会误伤合法漏洞的词形：
-// 「会话劫持」是合法高危，裸「劫持」会误杀，故只收「点击劫持」全词）。
-var srcHardVetoKeywords = []string{"点击劫持", "端口扫描", "版本披露", "指纹识别", "指纹泄露"}
-
-// srcBlacklistVulnClasses 是按 vulnclass 精确匹配（不区分大小写，空格归一为
-// 下划线）的普通黑名单类（带升级条件，写明「升级证据」可放行）。只收连写形
-// 不会被关键词表覆盖的英文类名；JSONP/CRLF/Self-XSS/CSRF/反射 XSS/用户名枚举
-// 等由关键词表覆盖（vulnclass 文本会拼进声明字段参与关键词匹配）。
-var srcBlacklistVulnClasses = []string{
-	// #5 弱口令/默认口令
-	"weak_password", "default_credential", "default_password", "weak_credential",
-	// #3 CRLF 的类名变体（「crlf」走关键词）
-	"header_injection",
-	// #1 反射 XSS 的类名变体（reflected_xss 走关键词）
-	"xss_reflected", "reflect_xss",
-	// #2 CSRF（低危改资料类；触达改绑/资金/管理需写明升级证据）
-	"csrf",
-	// #4 信息泄露（报错/目录列表/.git/备份）无进一步利用
-	"directory_listing", "git_exposure", "git_leak", "backup_exposure", "backup_leak",
-	"source_leak", "source_code_leak", "debug_info", "stack_trace",
-	"swagger_exposure", "api_doc_exposure",
-	// #11 用户名/账号/手机号枚举的类名变体（username_enumeration 走关键词）
-	"user_enumeration", "phone_enumeration", "mobile_enumeration",
-	// #12 短信轰炸的类名变体（中文「短信轰炸」走关键词）
-	"sms_bombing", "sms_bomb", "sms_flood", "sms_flooding",
-}
-
-// srcBlacklistKeywords 是对声明字段（vulnclass/name/summary）做连写子串匹配的
-// 普通黑名单关键词（带升级条件，写明「升级证据」可放行）。保守起见只收录 SRC
-// 明确不收、几乎不可能作为合法漏洞名出现的词形——裸「劫持」会误杀会话劫持/
-// DNS 劫持等合法高危，只收全词「JSONP 劫持」；「指纹」同理收窄。
-var srcBlacklistKeywords = []string{
-	// #3 JSONP 劫持 / CRLF 无利用面
-	"jsonp劫持", "jsonp", "crlf",
-	// #5 弱口令/默认口令
-	"弱口令", "默认口令",
-	// #1 Self-XSS / 无敏感操作的反射 XSS（反射 XSS 默认在黑名单内，敏感页面
-	// 上下文属升级条件——误伤存储型 XSS 对比反射型的提法可由升级证据放行）
-	"selfxss", "反射xss", "反射型xss", "reflectedxss", "reflectxss",
-	// #2 低危 CSRF（类名 csrf 走精确匹配；中文类型名走这里。不收裸「csrf」
-	// 关键词——「CSRF token/防护」在合法漏洞的摘要里太常见，会误杀）
-	"跨站请求伪造",
-	// #4 信息泄露（报错/目录列表/.git/备份）无进一步利用
-	"目录列表", "目录浏览", "git泄露", "git目录", "备份文件泄露", "备份泄露",
-	"phpinfo", "源码泄露", "源代码泄露", "堆栈泄露", "调试信息泄露",
-	"swagger泄露", "接口文档泄露",
-	// #11 用户名/账号/手机号枚举
-	"用户名枚举", "账号枚举", "账号存在性", "手机号枚举", "手机号存在性", "usernameenumeration",
-	// #12 短信轰炸/无频控发码（骚扰类，SRC 基本不收；升级到接管/资损需写明升级证据）。
-	// 不收裸「无频控」——合法高危的验证码绕过链里这个词太常见；也不收英文裸词
-	// 「sms flooding」之外的普通短信类词，防误杀短信内容泄露等合法方向。
-	"短信轰炸", "骚扰短信", "短信骚扰", "轰炸短信", "无限发短信", "smsbombing", "smsbomber", "smsflooding",
-	// #13 仅凭状态码/报错/响应差异判定（拦截显式自称「仅差异/仅状态码」的形态；
-	// 已证实的盲注/越权走正常类型上报，不按这里拦——裸「响应差异」会误杀布尔盲注，
-	// 只收全词「仅凭状态码」「仅响应差异」这类自我声明）
-	"仅凭状态码", "仅状态码", "仅凭响应差异", "仅响应差异", "仅凭报错差异", "状态码差异即漏洞", "报错差异即漏洞",
-	// #6/#7/#10 显式自称理论/无回显的形态。已证实的越权、未授权敏感数据、
-	// 回显 SSRF 是核心可收类型，不按类型拦——由 §四 证据线、§十一 复测纪律与
-	// 人工隔离区审查把关；这里只拦自己声明「理论/疑似/无回显」的上报。
-	"理论idor", "理论越权", "可能存在越权", "疑似越权", "推测越权",
-	"可能存在未授权", "疑似未授权",
-	"无回显ssrf", "ssrf无回显", "仅dnslog", "dnslog出网", "ssrf仅出网",
-}
-
-// srcUpgradeEscape 判定全文是否声明了升级证据。先剔除否定形（「无升级证据」
-// 「未提供升级证据」等）再查剩余文本——防止「无升级证据」这类否定句因包含
-// 字面标记而误放行。
-func srcUpgradeEscape(fullFlat string) bool {
-	for _, neg := range []string{
-		"无升级证据", "没有升级证据", "未提供升级证据", "未取得升级证据", "未拿到升级证据",
-		"缺少升级证据", "缺升级证据", "不含升级证据", "非升级证据", "升级证据不足", "升级证据缺失",
-	} {
-		fullFlat = strings.ReplaceAll(fullFlat, neg, "")
-	}
-	return strings.Contains(fullFlat, "升级证据")
-}
-
-// SrcFindingTexts 收拢 report_finding 的五个自由文本字段，作为黑名单硬闸的输入。
-type SrcFindingTexts struct {
-	VulnClass   string
-	Name        string
-	Summary     string
-	Evidence    string
-	Description string
-}
-
-// SrcFindingBlocked reports whether a report_finding call is blacklisted.
-// 匹配范围分级（防止误杀合法漏洞）：
-//   - 类型判定只看声明字段（vulnclass/name/summary）——evidence/description
-//     里的上下文性提及（如「已排除点击劫持」「不同于反射XSS」）不参与拦截；
-//   - 一票否决类（#8/#9：指纹/端口/版本披露、点击劫持）→ 无条件拦截，不看升级证据；
-//   - 其余黑名单类 → 声明字段命中且全文无「升级证据」声明则拦截（升级证据
-//     写在任一字段都算）；
-//   - #6/#7/#10 的「理论/无回显」形态只拦显式标记词，已证实的不拦（见
-//     srcBlacklistKeywords 注释）。
-func SrcFindingBlocked(t SrcFindingTexts) (bool, string) {
-	flat := srcFlat(t.VulnClass) + "\x00" + srcFlat(t.Name) + "\x00" + srcFlat(t.Summary)
-	fullFlat := flat + "\x00" + srcFlat(t.Evidence) + "\x00" + srcFlat(t.Description)
-	// 一票否决类永远拦截，不看升级证据。
-	vc := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(t.VulnClass), " ", "_"))
-	for _, c := range srcHardVetoVulnClasses {
-		if vc == c {
-			return true, c
-		}
-	}
-	for _, kw := range srcHardVetoKeywords {
-		if strings.Contains(flat, kw) {
-			return true, kw
-		}
-	}
-	if srcUpgradeEscape(fullFlat) {
-		return false, ""
-	}
-	for _, kw := range srcBlacklistKeywords {
-		if strings.Contains(flat, kw) {
-			return true, kw
-		}
-	}
-	for _, c := range srcBlacklistVulnClasses {
-		if vc == c {
-			return true, c
-		}
-	}
-	return false, ""
+	return guidance + "\n\n" + srcAcceptance() + srcHighRiskHunting
 }

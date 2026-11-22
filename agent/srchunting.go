@@ -7,15 +7,16 @@ import (
 	"unicode"
 )
 
-// 挖掘方向（hunting focus，见 GLOSSARY.md）的机器可查挂载：SRC 收取标准热载
-// 文件「挖掘方向」节底部的 ~~~hunting 围栏块。
+// 类型目录（type catalog，见 GLOSSARY.md）的机器可查挂载：SRC 收取标准热载
+// 文件末尾「机器可查目录」节的 ~~~types 围栏块（票 01：取代原「挖掘方向」节
+// 底部的 ~~~hunting 围栏）。
 //
 // 设计决策（ADR-0004：docs/adr/0004-type-diversity-soft-loop.md）：
 //  - 规范类型名清单、别名折叠映射、同类上限三个量全部住在热载文件里（启动
-//    读入、免重编译热改口径）；后续票据（同类上限闸、类型分布注入、统计呈现）
-//    消费本文件的接口，不各自解析标准文本。
+//    读入、免重编译热改口径）；后续票据（同类上限闸、类型分布注入、统计呈现、
+//    上报类型归属校验）消费本文件的接口，不各自解析标准文本。
 //  - 代码零漏洞类型词表常量：Go 侧只做机械归一（大小写/空白/连字符）+ 查表，
-//    桶名与别名一个不进代码。
+//    规范名、别名、proof/signals/stop 文案一个不进代码。
 //  - 折叠绝不拒收：表未覆盖的新写法以归一形自成一桶、照常计数，词表永不堵死
 //    合法新类型（反序列化变体、GraphQL 滥用等）。
 //  - 不缓存：与 srcAcceptance() 同哲学——本文件按 guidance 组装/上报校验的
@@ -25,41 +26,87 @@ import (
 // 围栏用 ~~~ 而非 ```：整份标准文本同时内嵌为 Go 原始字符串常量
 // srcAcceptanceDefault，其中不能出现反引号。
 
-// srcHuntingFence 是机器可查区围栏标记（严格全词匹配，防止正文误触发）。
-const srcHuntingFence = "~~~hunting"
+// srcTypesFence 是机器可查目录围栏标记（严格全词匹配，防止正文误触发）。
+const srcTypesFence = "~~~types"
 
 // srcHuntingCapDefault 是机器可查区缺失或损坏时的同类上限回退值（票面默认 3）。
 const srcHuntingCapDefault = 3
 
-// srcHuntingFocus 是挖掘方向节暴露的三个量。
-//   - Types：规范类型名清单，按文件书写序即优先级序（七类在前、越权垫底）；
-//   - Fold：归一后别名 → 规范桶名的折叠映射（规范桶名自身也是键）；
-//   - Cap：同类上限——单任务内同一规范类型有效产出（pending + confirmed）
-//     的数量上限，触顶即拒收该类型新 finding（见热载节文案）。
-type srcHuntingFocus struct {
-	Types []string
-	Fold  map[string]string
-	Cap   int
+// srcTypeEntry 是目录里一条类型：规范名 + 是否收取 + 别名 + 证明物/触发/止损。
+//   - Name：规范名（书写原形，含空格）。
+//   - Collect：true = 可收（受同类上限约束）；false = 明确不收（上报被拒收）。
+//   - Aliases：别名 token 清单（每个 token 不带空格，折叠时会抹掉空白/大小写/
+//     连字符）。
+//   - Proof / Signals / Stop：危害最小证明物 / 触发启发式 / 止损线文案。
+//     Proof 与收取标准 §四 证据线同源；Stop 是 collect:no 条目的拒收文案来源。
+type srcTypeEntry struct {
+	Name    string
+	Collect bool
+	Aliases []string
+	Proof   string
+	Signals string
+	Stop    string
 }
 
-// srcHunting 解析当前标准文本（热载文件优先，回退内嵌默认）的机器可查区。
-// 区缺失时返回零词表 + 默认上限：一切写法自成一桶照常计数、绝不拒收，上限
-// 仍按默认值生效——词表缺失不构成放水或堵死的理由。
-func srcHunting() srcHuntingFocus {
-	return parseSrcHunting(srcAcceptance())
+// srcTypeCatalog 是整份目录：按书写序的条目清单 + 全局同类上限。
+type srcTypeCatalog struct {
+	Entries []srcTypeEntry
+	Cap     int
 }
 
-// parseSrcHunting 从标准文本中提取第一个 ~~~hunting 围栏块并构建三个量。
+// lookup 按归一形（经别名）命中目录条目，返回规范名条目；未命中返回 false。
+// 规范名自身与所有别名都参与匹配，语义与 srcHuntingFocus.fold 的折叠一致。
+func (c srcTypeCatalog) lookup(name string) (srcTypeEntry, bool) {
+	key := srcFoldKey(name)
+	for _, e := range c.Entries {
+		if srcFoldKey(e.Name) == key {
+			return e, true
+		}
+		for _, a := range e.Aliases {
+			if srcFoldKey(a) == key {
+				return e, true
+			}
+		}
+	}
+	return srcTypeEntry{}, false
+}
+
+// fold 把 vulnclass 折叠到目录规范名：归一 → 查表；未命中以归一形自成一桶——
+// 照常计数、绝不拒收。语义与 srcHuntingFocus.fold 完全一致。
+func (c srcTypeCatalog) fold(vulnclass string) string {
+	if e, ok := c.lookup(vulnclass); ok {
+		return e.Name
+	}
+	return srcFoldKey(vulnclass)
+}
+
+// srcCatalog 现读现解析当前标准文本（热载文件优先，回退内嵌默认）的类型目录。
+// 不缓存：改文件下一次调用即生效；块缺失时 srcAcceptance() 已回退内嵌默认，
+// 仍能解析出默认目录。任何非法行跳过不失败。
+func srcCatalog() srcTypeCatalog {
+	return parseSrcTypes(srcAcceptance())
+}
+
+// parseSrcTypes 从标准文本提取第一个 ~~~types 围栏块并构建目录。
 // 容错原则：块内无法解析的行（无冒号、空键、非法数字）直接跳过、不失败——
-// 标准文件是给人热改的，一次手误不能让折叠机制整体失效；多个合法 cap 行以
-// 最后为准；负数 cap 视为手误忽略（0 是合法的显式配置，照收）。
-func parseSrcHunting(text string) srcHuntingFocus {
-	f := srcHuntingFocus{Fold: map[string]string{}, Cap: srcHuntingCapDefault}
+// 标准文件是给人热改的，一次手误不能让整个目录失效；cap 缺省 3、负数忽略、
+// 多个合法 cap 行以最后为准；collect 缺省 true，值 no/false/否/不收 视为 false；
+// type 行开启一条新条目，后续 collect/aliases/proof/signals/stop 归属当前条目，
+// 条目结束（下一个 type 或块收口）时若规范名非空才入清单。
+func parseSrcTypes(text string) srcTypeCatalog {
+	c := srcTypeCatalog{Cap: srcHuntingCapDefault}
 	inBlock := false
+	var cur *srcTypeEntry
+	flush := func() {
+		if cur != nil && cur.Name != "" {
+			c.Entries = append(c.Entries, *cur)
+		}
+		cur = nil
+	}
 	for _, ln := range strings.Split(text, "\n") {
 		line := strings.TrimSpace(ln)
 		if !inBlock {
-			if line == srcHuntingFence {
+			if line == srcTypesFence {
 				inBlock = true
 			}
 			continue
@@ -75,29 +122,82 @@ func parseSrcHunting(text string) srcHuntingFocus {
 			continue
 		}
 		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		if key == "cap" {
-			if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n >= 0 {
-				f.Cap = n
+		val = strings.TrimSpace(val)
+		switch key {
+		case "cap":
+			if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+				c.Cap = n
 			}
-			continue
+		case "type":
+			flush()
+			if val != "" {
+				cur = &srcTypeEntry{Name: val, Collect: true}
+			}
+		case "collect":
+			if cur != nil {
+				cur.Collect = parseCollect(val)
+			}
+		case "aliases":
+			if cur != nil {
+				cur.Aliases = append(cur.Aliases, strings.Fields(val)...)
+			}
+		case "proof":
+			if cur != nil {
+				cur.Proof = val
+			}
+		case "signals":
+			if cur != nil {
+				cur.Signals = val
+			}
+		case "stop":
+			if cur != nil {
+				cur.Stop = val
+			}
 		}
-		// 规范桶行：桶名自身与各别名都以归一形入表、指向桶名原文；重复出现的
-		// 桶名只入清单一次（别名合并，后行覆盖同键）。
-		if !slices.Contains(f.Types, key) {
-			f.Types = append(f.Types, key)
+	}
+	flush()
+	return c
+}
+
+// parseCollect 解析 collect 开关：缺省 true；no/false/否/不收 视为 false。
+func parseCollect(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "no", "false", "否", "不收":
+		return false
+	}
+	return true
+}
+
+// srcHuntingFocus 是目录暴露给既有消费方的三个量（票 01 保留，由目录派生）。
+//   - Types：全部条目规范名清单，按目录书写序（可收类型在前、不收类型在后）；
+//   - Fold：归一后别名 → 规范名的折叠映射（规范名自身也是键）；
+//   - Cap：同类上限——单任务内同一规范类型有效产出（pending + confirmed）
+//     的数量上限，触顶即拒收该类型新 finding（见目录文案）。
+type srcHuntingFocus struct {
+	Types []string
+	Fold  map[string]string
+	Cap   int
+}
+
+// srcHunting 由目录派生旧三量接口（finding_cap / findingTypeCounts 等仍消费）。
+// 目录缺失时返回零词表 + 默认上限：一切写法自成一桶照常计数、绝不拒收，上限
+// 仍按默认值生效——词表缺失不构成放水或堵死的理由。
+func srcHunting() srcHuntingFocus {
+	c := srcCatalog()
+	f := srcHuntingFocus{Fold: map[string]string{}, Cap: c.Cap}
+	for _, e := range c.Entries {
+		if !slices.Contains(f.Types, e.Name) {
+			f.Types = append(f.Types, e.Name)
 		}
-		f.Fold[srcFoldKey(key)] = key
-		for _, alias := range strings.Fields(val) {
-			f.Fold[srcFoldKey(alias)] = key
+		f.Fold[srcFoldKey(e.Name)] = e.Name
+		for _, a := range e.Aliases {
+			f.Fold[srcFoldKey(a)] = e.Name
 		}
 	}
 	return f
 }
 
-// fold 把 vulnclass 折叠到本词表的规范桶名：归一 → 查表；未命中以归一形
+// fold 把 vulnclass 折叠到本目录的规范名：归一 → 查表；未命中以归一形
 // 自成一桶——照常计数、绝不拒收。
 func (f srcHuntingFocus) fold(vulnclass string) string {
 	key := srcFoldKey(vulnclass)
