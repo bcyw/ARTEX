@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -412,7 +413,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	const openIntentsCap = 30
 	fr, _ := t.ts.Frontier(openIntentsCap) // priority DESC, id ASC —— 优先级最高的前 N 条；真实总数见 frontier_open
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
-	all, _ := t.ts.ListByKind(db.KindIntent, 300)
+	// Coverage counters need every intent, including older nodes outside the
+	// frontier/recent-done display windows. Reuse this query without a row cap.
+	all, _ := t.ts.ListByKind(db.KindIntent, math.MaxInt)
 	var running, recentDone []*db.Node
 	for _, n := range all {
 		switch n.State {
@@ -453,7 +456,25 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// 口径与同类上限闸一致：排除 quarantined/false_positive/duplicate/ignored（探索节点
 	// state 恒 confirmed，状态真相在 findings 表 → 交叉既有 FindingMetaByNodeID，零新增
 	// SQL）。分布只进规划者态势：worker 渲染路径剔除本键（renderWorkerGraphOverview）。
-	out["finding_type_counts"] = findingTypeCounts(t, vulnNodes)
+	// 桶计数只折叠一次，finding_type_counts 与 type_coverage 共用同一份结果，保证两处
+	// findings 数字永不漂移。
+	typeBuckets := findingTypeBuckets(t, vulnNodes)
+	out["finding_type_counts"] = findingTypeCountsFrom(typeBuckets)
+	// type_coverage：按类型目录书写序给出「每类方向的覆盖状态」，让规划按目录补空白，
+	// 而不是凭感觉发散（spec D5）。每行：
+	//   findings   本任务该规范桶的有效 finding 数——与 finding_type_counts 同一折叠桶、
+	//              同一状态排除口径（quarantined/false_positive/duplicate/ignored 不计；
+	//              无 findings 行的节点按节点态计）。
+	//   full       findings >= 目录 cap（该方向同类上限已满）。
+	//   intents_*  本任务 payload 带 vuln_type 的意图节点按 state 计数：open→open、
+	//              running→running、终态（done/blocked/exhausted/stopped）→done；
+	//              paused/deleted/未知态不计（暂停不可领取、删除等于不存在——宁可少计，
+	//              也不让已撤销方向假装排过队）。意图按目录 fold 归桶；目录外写法自成
+	//              一桶但不进本表（覆盖表只服务「按目录规划」）。
+	// 零新增 SQL：finding 与意图节点都是本函数上方已预取的列表；意图预取不截断，
+	// 明细窗口不影响覆盖计数。意图列表取不到时该行 intents_* 全为 0、不报错。与 finding_type_counts
+	// 同理仅规划者可见（worker 渲染路径剔除）。
+	out["type_coverage"] = typeCoverageRows(srcCatalog(), typeBuckets, all)
 
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
 	// 让 planner 每轮判目标时一眼看到最近确认的漏洞；全量/更早的用 list_findings 取。
@@ -590,7 +611,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 // type distribution share it, so only real, non-redundant output counts.
 func findingStatusExcluded(status string) bool {
 	switch status {
-	case db.FindingQuarantined, db.FindingFalsePositive, db.FindingDuplicate, db.FindingIgnored:
+	case db.FindingQuarantined, db.FindingFalsePositive, db.FindingDuplicate, db.FindingIgnored, "dismissed":
 		return true
 	}
 	return false
@@ -598,8 +619,8 @@ func findingStatusExcluded(status string) bool {
 
 // findingStatusMeta 取本任务 finding 节点在独立 findings 表的状态真相
 // （nodeID → status）。AssetStore 缺席、taskID 未设或查询失败时返回 nil：
-// 调用方回退为「节点存在即计」的宽松口径——排除信息缺失时宁可多计也不漏计
-// （更早触顶、分布偏宽），语义为 findingTypeCounts / srcClassCapReached 共享。
+// 调用方回退到节点态（confirmed 计入、dismissed 排除），语义为
+// findingTypeCounts / srcClassCapReached 共享。
 func (t *ToolSet) findingStatusMeta() map[int64]db.FindingMeta {
 	if t.as == nil || t.taskID <= 0 {
 		return nil
@@ -611,16 +632,15 @@ func (t *ToolSet) findingStatusMeta() map[int64]db.FindingMeta {
 	return meta
 }
 
-// findingTypeCounts builds the planner-facing type-distribution block from the
-// already-fetched finding nodes. Buckets come from the hot-loaded hunting-focus
-// fold table (canonical names + alias folding, no type vocabulary in code —
-// ADR-0004); rows render in the hunting block's written (priority) order, then
-// remaining unknown buckets alphabetically, so the planner reads the same
-// ordering it gets in the hunting guidance. Nodes whose standalone findings row
-// is quarantined/false_positive/duplicate/ignored are excluded (same effective
-// 口径 as the per-type cap gate); a node without a findings row for this task
-// keeps its node-level 'confirmed' state and still counts.
-func findingTypeCounts(t *ToolSet, vulnNodes []*db.Node) map[string]any {
+// findingTypeBuckets folds the already-fetched finding nodes into canonical
+// buckets: canonical bucket name → effective finding count. Buckets come from
+// the hot-loaded hunting-focus fold table (canonical names + alias folding, no
+// type vocabulary in code — ADR-0004). Nodes whose standalone findings row is
+// quarantined/false_positive/duplicate/ignored are excluded (same effective 口径
+// as the per-type cap gate); a node without a findings row for this task uses
+// its node-level state (confirmed counts, dismissed does not). Shared by
+// finding_type_counts and type_coverage so the two never disagree.
+func findingTypeBuckets(t *ToolSet, vulnNodes []*db.Node) map[string]int {
 	focus := srcHunting()
 	counts := map[string]int{}
 	meta := t.findingStatusMeta()
@@ -631,11 +651,24 @@ func findingTypeCounts(t *ToolSet, vulnNodes []*db.Node) map[string]any {
 		if strings.TrimSpace(vc) == "" {
 			continue // 无类型的 finding 无法入桶；findings_total 已计它
 		}
-		if m, ok := meta[n.ID]; ok && findingStatusExcluded(m.Status) {
+		status := n.State
+		if m, ok := meta[n.ID]; ok {
+			status = m.Status
+		}
+		if findingStatusExcluded(status) {
 			continue
 		}
 		counts[focus.fold(vc)]++
 	}
+	return counts
+}
+
+// findingTypeCountsFrom renders a bucket→count map as the distribution block.
+// Rows render in the hunting block's written (priority) order, then remaining
+// unknown buckets alphabetically, so the planner reads the same ordering it gets
+// in the hunting guidance.
+func findingTypeCountsFrom(counts map[string]int) map[string]any {
+	focus := srcHunting()
 	rows := make([]map[string]any, 0, len(counts))
 	seen := make(map[string]bool, len(counts))
 	for _, bucket := range focus.Types { // 词表书写序 = 优先级序 = 稳定渲染槽位
@@ -661,6 +694,61 @@ func findingTypeCounts(t *ToolSet, vulnNodes []*db.Node) map[string]any {
 // the per-type cap so the planner sees at a glance which directions are closed.
 func findingTypeCountRow(bucket string, count, cap int) map[string]any {
 	return map[string]any{"type": bucket, "count": count, "full": count >= cap}
+}
+
+// typeCoverageRows renders the type_coverage table: one row per catalog entry,
+// in catalog written order (collectable types first, explicitly-not-collected
+// ones after — the same ordering the hunting guidance uses), so the planner can
+// pick directions by reading down the list and spotting empty rows.
+//
+// findings reuses the finding_type_counts bucket counts; full marks a bucket at
+// the catalog's per-type cap. intents_* count this task's intent nodes that
+// carry a vuln_type payload key, folded to canonical names, grouped by node
+// state: open → intents_open, running → intents_running, terminal states
+// (done/blocked/exhausted/stopped) → intents_done. paused/deleted/unknown states
+// are not counted — a paused intent is not claimable and a deleted one should not
+// make a direction look already-queued; under-counting is the safe direction for
+// a coverage signal. Buckets outside the catalog (new spellings) are folded but
+// deliberately omitted from the table: type_coverage only serves "plan by the
+// catalog". A nil intent list degrades to all-zero intent columns, never an error
+// (zero extra SQL — callers pass lists they already fetched).
+func typeCoverageRows(catalog srcTypeCatalog, findingCounts map[string]int, intents []*db.Node) []map[string]any {
+	intentsOpen := map[string]int{}
+	intentsRunning := map[string]int{}
+	intentsDone := map[string]int{}
+	for _, n := range intents {
+		var p map[string]any
+		if err := json.Unmarshal(n.Payload, &p); err != nil {
+			continue // 坏 payload 不计，不影响覆盖表其余行
+		}
+		vt, _ := p["vuln_type"].(string)
+		if strings.TrimSpace(vt) == "" {
+			continue // 无类型的意图无法归入目录方向
+		}
+		bucket := catalog.fold(vt)
+		switch n.State {
+		case "open":
+			intentsOpen[bucket]++
+		case "running":
+			intentsRunning[bucket]++
+		case "done", "blocked", "exhausted", "stopped":
+			intentsDone[bucket]++
+		}
+	}
+	rows := make([]map[string]any, 0, len(catalog.Entries))
+	for _, e := range catalog.Entries { // 目录书写序 = 优先级序
+		findings := findingCounts[e.Name]
+		rows = append(rows, map[string]any{
+			"type":            e.Name,
+			"collect":         e.Collect,
+			"findings":        findings,
+			"full":            findings >= catalog.Cap,
+			"intents_open":    intentsOpen[e.Name],
+			"intents_running": intentsRunning[e.Name],
+			"intents_done":    intentsDone[e.Name],
+		})
+	}
+	return rows
 }
 
 func inheritedMap(m map[string]any, sourceTaskID int64) map[string]any {
