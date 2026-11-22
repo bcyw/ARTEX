@@ -1130,11 +1130,28 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 // --- planner write tools ---
 
 // intentItem 是 add_intent 批量/单条的一条探索方向。
+// VulnType 是目标漏洞类型（目录规范名或别名，空 = 纯侦察意图）；Proof 是本方向
+// 的最小证明物（可选，空则取目录里该类型的 proof）。批量元素与单条同规则。
 type intentItem struct {
 	Summary   string            `json:"summary"`
+	VulnType  string            `json:"vuln_type"`
+	Proof     string            `json:"proof"`
 	AssetIDs  []json.RawMessage `json:"asset_ids"`
 	ParentIDs []json.RawMessage `json:"parent_ids"`
 	Priority  int               `json:"priority"`
+}
+
+// collectableNames 列出目录内 collect: true 的规范名，保持目录书写序。
+// 规划期拒建文案里的「当前可收类型」全部从这里现读，Go 侧零类型词表常量
+// （ADR-0004：类型目录只住在热载标准文件的 ~~~types 块里）。
+func collectableNames(c srcTypeCatalog) []string {
+	names := make([]string, 0, len(c.Entries))
+	for _, e := range c.Entries {
+		if e.Collect {
+			names = append(names, e.Name)
+		}
+	}
+	return names
 }
 
 // addOneIntent 创建一条意图节点并连上游血缘，返回 id。
@@ -1156,12 +1173,35 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 			return 0, fmt.Errorf("parent_id %d 是 %q 节点，不能作为意图锚点：意图只能锚在已确认的【事实(fact)/发现(finding)】上，不能挂在意图/目标/提示上；顶层全新方向请留空 parent_ids", pidv, n.Kind)
 		}
 	}
+	// 规划期目录校验（票 02，spec D3/D4）：类型非空时必须能在热载目录里
+	// resolve 且 collect:true；明确不收与目录外自造类型在建节点前拒建。
+	// 空类型 = 纯侦察意图，放行且 payload 不写类型键。校验通过后落目录规范名
+	// （别名写法折叠，不存别名原文）与证明物（调用方给的优先，缺省取目录值）。
+	payload := map[string]any{"summary": it.Summary}
+	if vulnType := strings.TrimSpace(it.VulnType); vulnType != "" {
+		catalog := srcCatalog()
+		entry, ok := catalog.lookup(vulnType)
+		if !ok {
+			return 0, fmt.Errorf("意图类型「%s」不在标准类型目录内：规划期只能选目录里 collect: yes 的可收类型。当前可收类型（按目录序）：%s。新类型请先用 record_fact 记录观察，由维护者热改 standards/src-acceptance.md 的 ~~~types 目录后再用；纯侦察方向请省略 vuln_type", vulnType, strings.Join(collectableNames(catalog), "、"))
+		}
+		if !entry.Collect {
+			stop := entry.Stop
+			if stop == "" {
+				stop = "该类型明确不在收取范围"
+			}
+			return 0, fmt.Errorf("意图类型「%s」按 SRC 收取标准明确不收：%s。不要为它建意图——请改用 record_fact 记录本次观察，或从当前可收类型里另选方向：%s", entry.Name, stop, strings.Join(collectableNames(catalog), "、"))
+		}
+		payload["vuln_type"] = entry.Name
+		payload["proof"] = entry.Proof
+		if proof := strings.TrimSpace(it.Proof); proof != "" {
+			payload["proof"] = proof
+		}
+	}
 	priority := it.Priority
 	if priority == 0 {
 		priority = 5
 	}
 	anchors := pidList(it.AssetIDs)
-	payload := map[string]any{"summary": it.Summary}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
@@ -1186,11 +1226,13 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 }
 
 func (t *ToolSet) addIntent() actool.CoreTool {
-	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
+	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图必须从 SRC 类型目录（standards/src-acceptance.md 的 ~~~types 节）选定目标类型 vuln_type，并声明本方向要拿到的证明物 proof；类型与证明物随意图落库，worker 按它执行、上报的漏洞类型也由它锚定。目录内 collect: no（标准明确不收）或目录外自造类型会在规划期被拒建；纯侦察方向可省略 vuln_type。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
-			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
+			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/vuln_type/proof/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。类型用 vuln_type 结构化声明，不要只在 summary 里写类型。"),
+			"vuln_type":  str("本方向的目标漏洞类型：取 SRC 标准类型目录里 collect: yes 的规范名或别名（目录 = standards/src-acceptance.md 的 ~~~types 节；工具报错时会列出当前可收类型）。标准明确不收（collect: no）与目录外自造类型会被拒建。纯侦察/信息收集方向留空 = 不带类型。"),
+			"proof":      str("本类型的最小证明物（可选）：本方向拿到什么才算数。缺省用目录里该类型的 proof 文案；有更贴合本方向的证明物可覆盖。只在该方向带 vuln_type 时生效。"),
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
 			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
 			"priority":   intp("优先级 0-10，默认5"),
@@ -1198,7 +1240,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Intents    []intentItem `json:"intents"`
-				intentItem              // 单条模式：顶层 summary/asset_ids/parent_ids/priority
+				intentItem              // 单条模式：顶层 summary/vuln_type/proof/asset_ids/parent_ids/priority
 			}
 			_ = json.Unmarshal(in, &a)
 			batch := len(a.Intents) > 0
