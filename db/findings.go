@@ -47,10 +47,11 @@ const (
 	FindingIgnored       = "ignored"        // 忽略
 	FindingDuplicate     = "duplicate"      // 重复
 	FindingRiskAccepted  = "risk_accepted"  // 风险接受
-	// FindingQuarantined 是 SRC 黑名单硬闸的隔离区：report_finding 命中黑名单且
-	// 无升级证据时入库到此状态,供人工检查——不删除(避免静默丢失)、不进交付
-	// 报告(报告只取 confirmed)。人工核实确有升级证据后可改回 pending/confirmed。
-	FindingQuarantined = "quarantined" // 隔离(黑名单拦截)
+	// FindingQuarantined 是历史语义：旧版词表闸（agent 层 SrcFindingBlocked）的
+	// 隔离区状态。新代码已改用类型目录（collect:false 直接拒收）不再产生此状态，
+	// 该常量仅为保留存量数据的查询/展示与人工放行路径；人工核实确有升级证据后
+	// 可改回 pending/confirmed。
+	FindingQuarantined = "quarantined" // 隔离(旧版词表闸历史状态)
 )
 
 // ValidFindingStatus reports whether s is a known triage state.

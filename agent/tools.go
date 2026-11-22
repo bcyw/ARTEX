@@ -1358,35 +1358,41 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if !db.ValidSeverity(a.Severity) {
 			return actool.Errorf("severity 必须为 critical / high / medium / low 之一（按 SRC 定级纪律选择：拿不准降级不升级）"), nil
 		}
+		// 类型归属校验（票 01，取代旧版 SRC 黑名单硬闸）：目录（~~~types）是
+		// 类型归属唯一机器来源。规则①意图锚定：意图带 vuln_type 时用它兜底/校验；
+		// 规则②范围规则：collect:false 明确拒收并引用其 stop 文案；规则③目录外
+		// 未知类型放行（词表不堵死新类型）。校验通过后落库统一用规范名。
+		catalog := srcCatalog()
+		vulnClass := a.VulnClass
+		if iid := pid(a.IntentID); iid > 0 {
+			if node, err := t.ts.GetNodeWithSources(iid); err == nil && node != nil {
+				var ip map[string]any
+				if json.Unmarshal(node.Payload, &ip) == nil {
+					if intentType, _ := ip["vuln_type"].(string); intentType != "" {
+						if vulnClass == "" {
+							vulnClass = intentType
+						} else if catalog.fold(vulnClass) != catalog.fold(intentType) {
+							return actool.Errorf(fmt.Sprintf("类型归属不符：本次意图的类型是「%s」，上报的 vulnclass 是「%s」。请补强已有 finding（同根因不另立报）或 record_fact 记录观察，不要改报类型", intentType, a.VulnClass)), nil
+						}
+					}
+				}
+			}
+		}
+		if entry, ok := catalog.lookup(vulnClass); ok && !entry.Collect {
+			return actool.Errorf(fmt.Sprintf("该类型「%s」不在 SRC 收取范围：%s。请改用 record_fact 记录观察，或改报目录内 collect: yes 的可收类型", entry.Name, entry.Stop)), nil
+		}
+		if entry, ok := catalog.lookup(vulnClass); ok {
+			vulnClass = entry.Name
+		}
 		// 同类上限闸：单任务内单一漏洞类型的有效产出（pending+confirmed）触顶即
 		// 拒收并引导转向；上限值与折叠词表均在热载标准文件维护（见 finding_cap.go
-		// 与 srchunting.go），代码不含类型词表常量（ADR-0004）。先于黑名单闸：
-		// 隔离上报不消耗名额，两个闸互不干扰。
-		if n, limit, reached := t.srcClassCapReached(a.VulnClass); reached {
-			return actool.Errorf(fmt.Sprintf("同类上限触顶：本任务该类型（%s）有效产出已达 %d/%d，不再接收新 finding。请补强已有 finding（追加证据与影响面，同根因不另立新报），或改用 record_fact 记录本次观察，并把探索方向转向其他未触顶类型", a.VulnClass, n, limit)), nil
+		// 与 srchunting.go），代码不含类型词表常量（ADR-0004）。归属校验通过的类型
+		// 才参与计数，两个闸互不干扰。
+		if n, limit, reached := t.srcClassCapReached(vulnClass); reached {
+			return actool.Errorf(fmt.Sprintf("同类上限触顶：本任务该类型（%s）有效产出已达 %d/%d，不再接收新 finding。请补强已有 finding（追加证据与影响面，同根因不另立新报），或改用 record_fact 记录本次观察，并把探索方向转向其他未触顶类型", vulnClass, n, limit)), nil
 		}
-		// SRC 黑名单硬闸：命中且无升级证据 → 入库进隔离区（status=quarantined），
-		// 不删除（保留排查误杀的余地）、不进交付报告（报告只取 confirmed）。
-		// input 先完整构造（与正常路径同一份，含 IntentID/AssetIDs——隔离 finding
-		// 也要保留意图与资产关联，人工放行后信息完整），blocked 只改 Quarantine 标记。
-		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs),
+		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: vulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs),
 			Description: a.Description, Impact: a.Impact, Remediation: a.Remediation, Session: a.Session}
-		if blocked, reason := SrcFindingBlocked(SrcFindingTexts{VulnClass: a.VulnClass, Name: a.Name, Summary: a.Summary, Evidence: a.Evidence, Description: a.Description}); blocked {
-			input.Quarantine = true
-			q, err := t.ts.RecordFinding(ctx, input)
-			if err != nil {
-				return actool.Errorf(err.Error()), nil
-			}
-			t.writes.Findings++
-			raw, _ := json.Marshal(map[string]any{
-				"finding_id":        strconv.FormatInt(q.FindingID, 10),
-				"finding_node_id":   strconv.FormatInt(q.NodeID, 10),
-				"evidence_status":   "quarantined",
-				"quarantine_reason": reason,
-				"note":              "命中 SRC 收取黑名单（" + reason + "）。指纹/端口/版本披露、点击劫持属一票否决，无论证据一律不收；其余黑名单类型如确有升级条件对应的真实危害证据，在 summary 中写明「升级证据：…」并附实际响应证据后重新上报；否则请改用 record_fact 记 inferred 事实。",
-			})
-			return actool.Text(fmt.Sprintf("finding quarantined: %d\n%s", q.NodeID, raw)), nil
-		}
 		// Auto-binding off: ignore the evidence params instead of rejecting the call.
 		// stripTrafficParameters already removes them from the advertised schema, but
 		// models routinely emit fields anyway — failing here would discard a confirmed

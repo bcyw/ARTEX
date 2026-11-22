@@ -80,17 +80,24 @@ func TestReportFindingCapAliasFolding(t *testing.T) {
 	}
 }
 
-func TestReportFindingQuarantineNotCounted(t *testing.T) {
+func TestReportFindingUncollectedTypeNotRecorded(t *testing.T) {
 	ts, _ := capToolSet(t)
-	// 命中黑名单（一票否决）的上报全部进隔离区；隔离产出不占同类上限名额，
-	// 第 4 条仍应走隔离路径而非触顶拒收（上限检查先于黑名单闸的另一面）。
+	notices := 0
+	ts.notifyFinding = func(int64, string) { notices++ }
+	// 票 01：旧版「黑名单命中进隔离区」退场，改为目录 collect: no 的明确不收
+	// 类型直接拒收（不落库、不占名额、不触发 reporter）。
 	for i := 0; i < 3; i++ {
-		if got := capReport(t, ts, "clickjacking"); !strings.Contains(got, "quarantined") {
-			t.Fatalf("第 %d 条黑名单上报未进隔离区: %s", i+1, got)
+		got := capReport(t, ts, "clickjacking")
+		if !strings.Contains(got, "不在 SRC 收取范围") {
+			t.Fatalf("第 %d 条明确不收类型未拒收: %s", i+1, got)
 		}
 	}
-	if got := capReport(t, ts, "clickjacking"); !strings.Contains(got, "quarantined") {
-		t.Fatalf("隔离产出不应占同类上限名额（第 4 条仍应隔离而非触顶拒收）: %s", got)
+	if ts.writes.Findings != 0 || notices != 0 {
+		t.Fatalf("拒收的上报不应落库或通知: writes=%d notices=%d", ts.writes.Findings, notices)
+	}
+	// 同任务内可收类型照常上报，说明拒收未污染上限口径。
+	if got := capReport(t, ts, "GraphQL 滥用"); !strings.HasPrefix(got, "finding recorded: ") {
+		t.Fatalf("可收类型被误伤: %s", got)
 	}
 }
 
@@ -158,7 +165,7 @@ func TestReportFindingCapHotLoaded(t *testing.T) {
 	// （srcAcceptance 每次现读，改文件无需重编译）。
 	dir := t.TempDir()
 	path := filepath.Join(dir, "src-acceptance.md")
-	custom := "测试收取标准\n\n~~~hunting\ncap: 1\n~~~\n"
+	custom := "测试收取标准\n\n~~~types\ncap: 1\n~~~\n"
 	if err := os.WriteFile(path, []byte(custom), 0o644); err != nil {
 		t.Fatal(err)
 	}

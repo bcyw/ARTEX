@@ -7,11 +7,12 @@ import (
 )
 
 // 同类上限闸（票 02）的计数实现：单任务内单一漏洞类型（折叠后规范桶）的
-// 有效产出触顶即拒收（addFinding 校验序里排在 severity 之后、SRC 黑名单闸
-// 之前——隔离上报不消耗名额，两个闸互不干扰）。
+// 有效产出触顶即拒收（addFinding 校验序里排在 severity 之后、类型归属校验
+// 之后——归属校验通过的类型才参与计数，两闸互不干扰）。
 //
 // 计数口径：pending + confirmed 为有效产出；quarantined / false_positive /
-// duplicate / ignored 不占名额（隔离上报走黑名单闸，发生在本闸之后）。
+// duplicate / ignored 不占名额（quarantined 是旧版词表闸的历史状态，新代码
+// 不再产生，仅保留存量数据的交叉口径）。
 // 数据源与态势类型分布同源：探索图 finding 节点 payload 的 vulnclass +
 // t.ts.ListByKind 预取（零新增 SQL）；探索节点 state 固定 'confirmed'，状态
 // 真相在独立 findings 表，经 AssetStore 交叉 FindingMetaByNodeID(taskID)。
