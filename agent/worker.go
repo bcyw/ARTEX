@@ -317,8 +317,60 @@ func intentAssetIDs(intent *db.Node) []int64 {
 	return p.AssetIDs
 }
 
+// intentTypePayload 是任务书标准卡需要从意图 payload 读取的字段（票 02 契约）：
+// vuln_type 是规划期确定的规范类型名（可写作别名），proof 是该意图具体的危害
+// 最小证明物。两者都可缺省：payload 无 vuln_type = 纯侦察意图，不加卡。
+type intentTypePayload struct {
+	VulnType string `json:"vuln_type"`
+	Proof    string `json:"proof"`
+}
+
 func renderIntentTask(intent *db.Node) string {
-	return fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", string(intent.Payload), intent.ID)
+	task := fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", string(intent.Payload), intent.ID)
+	var p intentTypePayload
+	if err := json.Unmarshal(intent.Payload, &p); err != nil {
+		return task // 非法 JSON：保持原文渲染，不因解析失败挡住 worker
+	}
+	return task + intentTypeCard(p.VulnType, p.Proof)
+}
+
+// intentTypeCard renders 「本类标准卡」 after the intent text: the type's canonical
+// name, minimal-proof artefact, trigger heuristics, stop line and discipline. All
+// type content comes from the hot-reloaded catalog (票 01) — this function holds
+// zero vuln-type literals (ADR-0004). vulnType empty (recon intent) → no card.
+//
+// Degraded path: the catalog may be temporarily broken (hot edit) or a historical
+// intent may name an entry that has since been deleted. Then the card degrades to
+// 「类型：<原值>」+ generic discipline instead of panicking or blocking the worker.
+func intentTypeCard(vulnType, proof string) string {
+	name := strings.TrimSpace(vulnType)
+	if name == "" {
+		return ""
+	}
+	const discipline = "\n【纪律】类型已在规划期确定，不得改报其他类型；拿不出上述证明物就不成立，不要报 finding——把已试手段与观察写进 record_fact（传本意图 id）。"
+	e, ok := srcCatalog().lookup(name)
+	if !ok {
+		return "\n\n【本类标准卡】\n【本方向的漏洞类型】" + name + discipline
+	}
+	card := "\n\n【本类标准卡（动手前按卡证明，拿不出证明物不成立）】" +
+		"\n【本方向的漏洞类型】" + e.Name
+	card += "\n【拿什么才算数（危害最小证明物）】" + firstNonEmpty(proof, e.Proof, srcCardFallback)
+	card += "\n【触发启发式】" + firstNonEmpty(e.Signals, srcCardFallback)
+	card += "\n【止损线】" + firstNonEmpty(e.Stop, srcCardFallback)
+	return card + discipline
+}
+
+// srcCardFallback 是目录条目缺字段时的中性占位文案（不含任何类型语义）。
+const srcCardFallback = "目录未给出，按上方收取标准判断"
+
+// firstNonEmpty 返回第一个去空白后非空的候选，全部为空时返回最后的候选。
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // renderWorkerGraphOverview folds the global situational snapshot into the worker's
