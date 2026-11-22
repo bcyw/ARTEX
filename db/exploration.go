@@ -9,12 +9,56 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // ErrIntentStateConflict marks a failed compare-and-set transition. Callers use
 // it to distinguish an expected control race (HTTP 409) from a storage failure.
 var ErrIntentStateConflict = errors.New("intent state changed concurrently")
+
+// Route admission spans ledger reads and a write. All tool sets for an
+// exploration share this lock, including stores reopened after planner turns.
+// Fixed stripes avoid retaining a mutex for every historical task.
+var routeAdmissionLocks [64]sync.Mutex
+
+func (s *ExplorationStore) LockRouteAdmission() func() {
+	mu := &routeAdmissionLocks[uint64(s.expID)%uint64(len(routeAdmissionLocks))]
+	mu.Lock()
+	return mu.Unlock
+}
+
+// RestoreIntentContinuation rolls back a failed enqueue without consuming its
+// evidence or budget. A concurrent control transition is never overwritten.
+func (s *ExplorationStore) RestoreIntentContinuation(node *Node) error {
+	_, err := s.db.Exec(`UPDATE exploration_nodes SET payload=$1, state=$2,
+blocked_reason=$3, completed_at=now(), content_version=content_version+1
+WHERE id=$4 AND exploration_id=$5 AND kind='intent' AND state='paused'`,
+		string(node.Payload), node.State, node.BlockedReason, node.ID, s.expID)
+	return err
+}
+
+// QueueIntentContinuation publishes the message and makes the intent claimable
+// in one write. The ordinary worker pool owns execution and concurrency limits.
+func (s *ExplorationStore) QueueIntentContinuation(id int64, message string) error {
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open',
+payload=json_set(payload, '$.continuation_message', $1), content_version=content_version+1
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='paused'`, message, id, s.expID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrIntentStateConflict
+	}
+	return nil
+}
+
+func (s *ExplorationStore) ClearIntentContinuation(id int64) error {
+	_, err := s.db.Exec(`UPDATE exploration_nodes
+SET payload=json_remove(payload, '$.continuation_message'), content_version=content_version+1
+WHERE id=$1 AND exploration_id=$2 AND kind='intent' AND state='running'`, id, s.expID)
+	return err
+}
 
 // utf8Clean normalizes captured text to valid UTF-8 and removes NUL bytes.
 func utf8Clean(s string) string {
@@ -367,6 +411,64 @@ func (s *ExplorationStore) SetIntentState(id int64, state string) error {
 SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $4 THEN now() ELSE NULL END
 WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, terminal)
 	return err
+}
+
+// UpdateIntentContinuation replaces the optional route block and records which
+// facts already justified a continuation of this same intent. Keeping the
+// consumed basis on the intent lets the route budget refuse replaying the same
+// fact while still allowing a genuinely new one.
+func (s *ExplorationStore) UpdateIntentContinuation(id int64, route map[string]any, consumed []int64, routeCap, runs int) error {
+	if route == nil {
+		return nil
+	}
+	raw, err := json.Marshal(route)
+	if err != nil {
+		return err
+	}
+	basis, err := json.Marshal(consumed)
+	if err != nil {
+		return err
+	}
+	if runs < 1 {
+		runs = 1
+	}
+	query := `UPDATE exploration_nodes
+SET payload=json_set(payload, '$.route', json($1), '$.route_consumed', json($2),
+                     '$.route_runs', $3),
+    content_version=content_version+1
+WHERE id=$4 AND exploration_id=$5 AND kind='intent'`
+	args := []any{string(raw), string(basis), runs, id, s.expID}
+	if routeCap > 0 {
+		query = `UPDATE exploration_nodes
+SET payload=json_set(payload, '$.route', json($1), '$.route_consumed', json($2),
+                     '$.route_runs', $3, '$.route_cap', $4),
+    content_version=content_version+1
+WHERE id=$5 AND exploration_id=$6 AND kind='intent'`
+		args = []any{string(raw), string(basis), runs, routeCap, id, s.expID}
+	}
+	res, err := s.db.Exec(query, args...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("intent not found")
+	}
+	return nil
+}
+
+// PrepareIntentContinuation moves a finished intent back to 'paused' so the
+// existing ExecuteWithMessage path can run one more turn on it. Only terminal
+// states are accepted; open/running/paused are left alone.
+func (s *ExplorationStore) PrepareIntentContinuation(id int64) (bool, error) {
+	res, err := s.db.Exec(`UPDATE exploration_nodes
+SET state='paused', completed_at=NULL, blocked_reason=NULL, content_version=content_version+1
+WHERE id=$1 AND exploration_id=$2 AND kind='intent'
+  AND state IN ('done','blocked','exhausted','stopped')`, id, s.expID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // CompareAndSetIntentState transitions one local intent only when its current
@@ -746,6 +848,29 @@ WHERE exploration_id=$1 AND kind=$2 ORDER BY id DESC LIMIT $3`, s.expID, kind, l
 	}
 	defer rows.Close()
 	return scanNodes(rows)
+}
+
+// IntentRunCounts returns how many worker runs each intent has completed, keyed
+// by intent node id. A run emits one terminal kind='result' activity, so reruns
+// of the SAME intent are visible here and can be charged to the route budget.
+func (s *ExplorationStore) IntentRunCounts() (map[int64]int, error) {
+	rows, err := s.db.Query(`SELECT node_id, COUNT(*) FROM activity
+WHERE exploration_id=$1 AND kind='result' AND node_id IS NOT NULL
+GROUP BY node_id`, s.expID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int{}
+	for rows.Next() {
+		var id int64
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
 }
 
 // ListByKindPage returns one newest-first page of nodes of a kind for reverse

@@ -629,12 +629,12 @@ func (s *Server) reseedMainAgentPrompt() {
 
 // reseedPlannerPrompt 对齐类型化意图、标准卡与 type_coverage 规划反馈。
 func (s *Server) reseedPlannerPrompt() {
-	s.reseedPromptToDefault("planner", "planner_prompt_src_mining_v5", agent.BuiltinPromptSeeds()["planner"], "类型目录驱动意图与覆盖态势")
+	s.reseedPromptToDefault("planner", "planner_prompt_src_mining_v6", agent.BuiltinPromptSeeds()["planner"], "技术利用路线与有界续探")
 }
 
 // reseedWorkerPrompt 对齐本类标准卡、证明物止损与意图类型锚定。
 func (s *Server) reseedWorkerPrompt() {
-	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v7", agent.BuiltinPromptSeeds()["worker"], "按标准卡证明且不改报类型")
+	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v8", agent.BuiltinPromptSeeds()["worker"], "技术利用路线与有界续探")
 }
 
 // reseedPentestPrompt 对齐独立挖掘的可收类型目录与证明物、止损线。

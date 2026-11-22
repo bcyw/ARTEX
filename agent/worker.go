@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -70,6 +71,10 @@ type Worker struct {
 	// extraTools are host-provided tools (e.g. traffic query, oast) appended to
 	// the worker's graph write-back tools.
 	extraTools []actool.CoreTool
+	// oobFactory, when set, opens a fresh OOB session for THIS run and returns
+	// its cleanup (StopPolling→Close). Each run gets an independent session per
+	// spec (不共享、不在启动时连接); nil = OOB 工具不装配。
+	oobFactory func() (oobSession, func(), error)
 	// injectConstraints resolves whether this task's operation constraints get
 	// injected into the worker system prompt. Read per run so the settings toggle
 	// takes effect without rebuilding the agent. nil = inject (default).
@@ -137,6 +142,9 @@ func (w *Worker) maxTokens() int {
 // SetConstraintInject wires a resolver deciding whether this task's operation
 // constraints get injected into the worker system prompt. nil = inject (default).
 func (w *Worker) SetConstraintInject(fn func() bool) { w.injectConstraints = fn }
+
+// SetOOBSessionFactory wires the per-run OOB session factory (nil = OOB 工具不装配).
+func (w *Worker) SetOOBSessionFactory(fn func() (oobSession, func(), error)) { w.oobFactory = fn }
 
 // wantConstraints reports whether constraint injection is enabled (default yes).
 func (w *Worker) wantConstraints() bool { return w.injectConstraints == nil || w.injectConstraints() }
@@ -236,6 +244,8 @@ const workerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 **SRC 挖掘的完成标准**：动手前先读本意图附带的【本类标准卡】，按 proof 拿证明物、按 signals 定位入口、按 stop 止损。类型已在规划期确定，report_finding 传本意图 intent_id，vulnclass 可省略沿用意图类型；显式填写须与意图类型一致，不得换类型上报。拿不到证明物就 record_fact 记录已试手段与观察。本意图指向某类漏洞时，**走透 = 挖到实际危害**——候选点找到≠完成，要实际触发并拿到该类型收取标准里的「危害最小证明物」（实际数据/回显/操作影响，见上方收取标准）。只走到"疑似存在"就收手，等于把 SRC 可收的漏洞留在了半路。触发不了才如实记 inferred 事实交规划者。
 
+**技术利用路线与续探**：同一入口、机制族与组件/参数是一条稳定路线；本意图的 route 里保留 hypothesis、prerequisites、next_step、tested、remaining。记录结论时用 route.outcome/reason 区分进展、有效阴性、技术受阻、暂无交互、服务不可用与证据不足，不要统一写成失败。完成本条意图即停，是否续探由规划者依据新 fact/finding 或新 tested 变体决定。
+
 **技能（Skill）使用纪律**：工具列表里有 Skill 元工具时，其描述内嵌了可用技能清单。**任务匹配某个技能的适用场景时，先调 Skill(name) 载入其操作指引再动手**——技能正文是该场景下久经验证的流程（脚本用法、边界、门禁），比现场摸索快且不易越界。典型时机：开局铺 API 攻击面、需要真实浏览器渲染/交互、操作外部扫描平台。载入后按其指引执行；技能指引与操作约束冲突时，操作约束优先。
 
 **边发现边写回**（写进图才算数，脑子/文字里的不算；每得一个结果立刻写，别攒到最后被步数耗尽丢掉）。三种写回，别串图：
@@ -256,6 +266,19 @@ func workerTrafficBlock(recording bool) string {
 		return ""
 	}
 	return "\n\n**流量工具**：\n- traffic_search / traffic_get / traffic_blob：回看响应、找已访问过的资源，**先查流量、不要重复 curl 同一 URL**。traffic_search **必须指定 host**、默认只回 3 条极轻量索引(id/method/url/status/resp_len，无响应内容)，需要更多显式调大 limit；可用 body_contains 在请求/响应正文里做全文搜索(至少 3 字符，支持子串和中文，如找密码/密钥/报错/内网地址)；要看某条原文用 traffic_get(id)，其中超大正文显示为 @blob sha256:<hash>，用 traffic_blob(hash) 分段取全文。"
+}
+
+// workerOOBBlock is code-injected only when this run actually has the OOB
+// tools. Keeping it out of the editable template prevents a prompt from
+// advertising tool calls that are absent when OOB is disabled or broken.
+func workerOOBBlock() string {
+	return "\n\n**OOB 使用**：需要带外确认时先 oob_generate 取本次专用回调地址，嵌入 payload 发给目标后再 oob_poll；收到回调只是中间证据，要继续验证实际危害，不能仅凭回调上报。健康空窗口是 no_interaction，服务故障是 service_unavailable，观察窗口未完成是 observation_incomplete——三者都不证明目标无漏洞，也不要自动重跑整个意图。"
+}
+
+// workerOOBUnavailableBlock makes a failed OOB setup explicit without turning
+// it into evidence about the target.
+func workerOOBUnavailableBlock() string {
+	return "\n\n**OOB 不可用**：本轮 OOB 初始化失败，带外验证暂不可用；不要把服务故障解释为目标无漏洞。可继续无关的本地验证，或记录受阻事实交给规划者。"
 }
 
 // artifactSpec is 段 [C]: the code-owned, non-editable tail appended to every
@@ -435,6 +458,20 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
 	base := append(tsx.WorkerTools(), w.extraTools...)
+	// OOB 会话：本 run 独立建立（规格：per-run 会话、不共享、不在启动时连接）。
+	// 工厂失败不阻断无关任务——OOB 只是能力缺失，run 照常执行（工具不装配）。
+	oobState := ""
+	if w.oobFactory != nil {
+		sess, oobCleanup, err := w.oobFactory()
+		if err == nil {
+			base = append(base, oobToolsForRun(tsx, sess)...)
+			defer oobCleanup() // run 结束 → StopPolling→Close，私钥随之丢弃
+			oobState = "ready"
+		} else {
+			log.Printf("[oob] worker run %s intent=%d 装配失败: %v", name, intent.ID, err)
+			oobState = "unavailable"
+		}
+	}
 	// worker 刻意不给 MultiEdit/Glob/Grep：文件精改用 Edit、检索走 Bash(grep/find)，
 	// 收敛工具面、减少低价值调用。其余 SDK 默认工具(Read/Write/Edit/LS/Bash/Sleep)照常。
 	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
@@ -457,6 +494,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
+	}
+	switch oobState {
+	case "ready":
+		sysBody += workerOOBBlock()
+	case "unavailable":
+		sysBody += workerOOBUnavailableBlock()
 	}
 	// 意图块 → 意图锚定资产块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
 	sysBody += renderIntentTask(intent)

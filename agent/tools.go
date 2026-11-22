@@ -79,6 +79,10 @@ type ToolSet struct {
 	// intent id (engine callback, wired by the planner): the worker injects it before
 	// its next tool call and re-plans, without being killed. nil = tool unavailable.
 	steerWork func(intentID int64, msg string) error
+	// continueWork, if set, runs one more turn on a FINISHED intent (engine callback,
+	// wired by the planner). It reuses the existing ExecuteWithMessage path, so no
+	// parallel scheduler is introduced; nil = continue_intent unavailable.
+	continueWork func(intentID int64, msg string) error
 	// enrich, if set, receives async auto-completion triggers (DNS resolve for a
 	// domain, HTTP probe for a site). nil = no engine enrichment.
 	enrich EnrichTrigger
@@ -119,6 +123,9 @@ func (t *ToolSet) SetNotifyGoal(fn func([]string)) { t.notifyGoal = fn }
 // the main-agent chat and cross-task orchestration, so a runtime-added hint fires a
 // planner round announced by name instead of a bare wake.
 func (t *ToolSet) SetNotifyHint(fn func([]string)) { t.notifyHint = fn }
+
+// SetContinueWork wires the engine's original-intent continuation callback.
+func (t *ToolSet) SetContinueWork(fn func(intentID int64, msg string) error) { t.continueWork = fn }
 
 // SetResumeTask wires the task-revive callback (see ToolSet.resumeTask). Set only by
 // the main-agent chat, so runtime-added goals can pull a finished task back to running.
@@ -371,6 +378,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	for _, h := range hints {
 		var p map[string]any
 		_ = json.Unmarshal(h.Payload, &p)
+		if p["kind"] == "route_round" {
+			continue // 路线轮次快照是规划预算元数据，不是人类战略提示
+		}
 		hint := map[string]any{"id": h.ID, "state": h.State, "text": p["text"]}
 		if findingTrafficBindingEnabled() && p["traffic_refs"] != nil {
 			hint["traffic_refs"] = p["traffic_refs"]
@@ -475,6 +485,18 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// 明细窗口不影响覆盖计数。意图列表取不到时该行 intents_* 全为 0、不报错。与 finding_type_counts
 	// 同理仅规划者可见（worker 渲染路径剔除）。
 	out["type_coverage"] = typeCoverageRows(srcCatalog(), typeBuckets, all)
+	// routes is the planner's compact route ledger: one row per deterministic
+	// identity, with attempt count, outcome, tested variants and remaining
+	// hypotheses. Raw payloads/events stay in node_detail and worker traces.
+	routeStates := t.routeStates()
+	routeRows := make([]map[string]any, 0, len(routeStates))
+	for _, st := range routeStates {
+		routeRows = append(routeRows, routeStateSummary(st))
+	}
+	sort.Slice(routeRows, func(i, j int) bool {
+		return routeRows[i]["id"].(string) < routeRows[j]["id"].(string)
+	})
+	out["routes"] = routeRows
 
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
 	// 让 planner 每轮判目标时一眼看到最近确认的漏洞；全量/更早的用 list_findings 取。
@@ -915,6 +937,9 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		for _, hint := range hints {
 			var payload map[string]any
 			_ = json.Unmarshal(hint.Payload, &payload)
+			if payload["kind"] == "route_round" {
+				continue // 预算元数据，不作为继承提示展示
+			}
 			hintSummary = append(hintSummary, inheritedMap(map[string]any{
 				"id": hint.ID, "state": hint.State, "text": budget.take(payload["text"], 400),
 			}, source.Task.TaskID))
@@ -1227,6 +1252,8 @@ type intentItem struct {
 	AssetIDs  []json.RawMessage `json:"asset_ids"`
 	ParentIDs []json.RawMessage `json:"parent_ids"`
 	Priority  int               `json:"priority"`
+	Route     *Route            `json:"route,omitempty"`
+	RouteCap  int               `json:"route_cap,omitempty"`
 }
 
 // collectableNames 列出目录内 collect: true 的规范名，保持目录书写序。
@@ -1247,6 +1274,8 @@ func collectableNames(c srcTypeCatalog) []string {
 // 节点（不能挂在别的意图/目标/提示上）。顶层全新方向留空 parent_ids，兜底连 origin fact。
 // 这样"每个意图都连到 fact 节点、且是发现驱动而非凭空规划"从创建路径上被强制。
 func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
+	unlock := t.ts.LockRouteAdmission()
+	defer unlock()
 	if strings.TrimSpace(it.Summary) == "" {
 		return 0, fmt.Errorf("summary 不能为空")
 	}
@@ -1293,6 +1322,21 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
+	if it.Route != nil {
+		states := t.routeStates()
+		route := normalizedRoute(it.Route)
+		state := states[routeIdentity(route.Entry, route.Family, route.Component, route.Parameter)]
+		if err := t.routeContinuation(state, it); err != nil {
+			return 0, err
+		}
+		payload["route"] = route
+		if payload["route_consumed"] == nil && len(parents) > 0 {
+			payload["route_consumed"] = parents
+		}
+	}
+	if it.RouteCap > 0 {
+		payload["route_cap"] = it.RouteCap
+	}
 	id, err := t.ts.AddIntent(payload, priority, anchors, "planner")
 	if err != nil {
 		return 0, err
@@ -1324,6 +1368,8 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
 			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
 			"priority":   intp("优先级 0-10，默认5"),
+			"route":      routeSchema(),
+			"route_cap":  intp("可选：覆盖该路线默认 6 次执行意图上限；仅在路线有明确运营理由时设置，设置后持久生效"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -1332,6 +1378,11 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			}
 			_ = json.Unmarshal(in, &a)
 			batch := len(a.Intents) > 0
+			// route 只描述单条路线：批量时每条意图各带自己的 route，顶层 route
+			// 语义不明（套用到所有条目会张冠李戴），明确拒绝。
+			if batch && a.intentItem.Route != nil {
+				return actool.Errorf("批量模式不能带顶层 route：请把每条意图的 route 放进 intents 数组的各元素内"), nil
+			}
 			items := a.Intents
 			if !batch {
 				items = []intentItem{a.intentItem}
@@ -1617,6 +1668,8 @@ type factItem struct {
 	Confidence string            `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
 	IntentID   json.RawMessage   `json:"intent_id"`
 	AssetIDs   []json.RawMessage `json:"asset_ids"`
+	Route      *Route            `json:"route,omitempty"` // 技术利用路线（可选）
+	Outcome    string            `json:"outcome,omitempty"`
 }
 
 // recordOneFact 写一条 fact 节点并连到意图（intent→yields→fact）。defaultIntent 为
@@ -1634,6 +1687,12 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 	}
 	if c := strings.TrimSpace(it.Confidence); c != "" {
 		payload["confidence"] = c
+	}
+	if it.Route != nil {
+		payload["route"] = normalizedRoute(it.Route)
+	}
+	if o := strings.TrimSpace(it.Outcome); o != "" {
+		payload["outcome"] = o
 	}
 	intent := pid(it.IntentID)
 	if intent <= 0 {
@@ -1666,13 +1725,15 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 		"  · confidence=observed（输出里直接看到）| inferred（据现象推断）。\n"+
 		"  · **否定类结论**（不可注入/端口关闭/未发现入口等）只写\"观察 + 试探性读法\"——陈述你实际看到什么，方向是否放弃由规划者综合全局定；务必给 evidence，手段没穷尽或证据弱（含只探一次、看起来像）标 inferred，确已穷尽且直接看到才标 observed。",
 		obj(map[string]any{
-			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids/route/outcome）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
 			"intent_id":  idp("产生本事实的意图 id（你领到的意图；批量时作为各条默认）"),
 			"detail":     str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
 			"evidence":   str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
 			"confidence": str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产"},
+			"route":      routeSchema(),
+			"outcome":    map[string]any{"type": "string", "description": "本步路线结果（可选）：progress=有进展；negative=有效阴性；blocked=技术受阻；no_interaction=健康窗口暂无交互；service_unavailable=OOB 服务不可用；observation_incomplete=观察窗口未完成、无法判断；insufficient_impact=有交互但危害不足以成报；prerequisite_disproved=前置条件已证伪；variants_exhausted=关键变体已耗尽；impact=危害已证实。不要把所有失败折叠为 negative。"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -2051,6 +2112,99 @@ func (t *ToolSet) steerWorkTool() actool.CoreTool {
 		})
 }
 
+// continueIntent continues a finished intent in place with new technical
+// information. It reuses the engine's ExecuteWithMessage path (no parallel
+// scheduler) and charges the run to the same route budget.
+func (t *ToolSet) continueIntent() actool.CoreTool {
+	return t.writeExpTool("continue_intent", "在原意图的同一会话上再执行一轮，用新的技术信息续跑同一路线（不新建意图、不重置去重或预算）。适用于原意图正常结束、但已有新的 fact/finding 或尚未测试的关键变体；路线预算按运行次数累计，达到上限或路线已停止时拒绝。",
+		obj(map[string]any{
+			"intent_id":  idp("要续跑的原意图 id"),
+			"message":    str("交给原 worker 的新技术信息与下一步动作（明确新事实/新变体，不能只换措辞）"),
+			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本次续跑依据的新 fact/finding id（至少一个此前未用于该路线的实质证据）"},
+			"route":      routeSchema(),
+			"route_cap":  intp("可选：为该路线设置持久预算；不填则沿用默认或已有上限"),
+		}, "intent_id", "message"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			unlock := t.ts.LockRouteAdmission()
+			defer unlock()
+			if t.continueWork == nil {
+				return actool.Errorf("continue_intent 当前不可用"), nil
+			}
+			var a struct {
+				IntentID  json.RawMessage   `json:"intent_id"`
+				Message   string            `json:"message"`
+				ParentIDs []json.RawMessage `json:"parent_ids"`
+				Route     *Route            `json:"route"`
+				RouteCap  int               `json:"route_cap"`
+			}
+			_ = json.Unmarshal(in, &a)
+			id := pid(a.IntentID)
+			if id <= 0 {
+				return actool.Errorf("intent_id 必填"), nil
+			}
+			if strings.TrimSpace(a.Message) == "" {
+				return actool.Errorf("message 必填：说明新增的技术信息与下一步"), nil
+			}
+			node, err := t.ts.GetNode(id)
+			if err != nil || node == nil || node.Kind != db.KindIntent {
+				return actool.Errorf("intent_id 必须是本任务的意图"), nil
+			}
+			if node.State != "done" && node.State != "blocked" && node.State != "exhausted" && node.State != "stopped" {
+				return actool.Errorf(fmt.Sprintf("只能续跑已结束的意图（done/blocked/exhausted/stopped），当前状态 %s；运行中的用 steer_work，未跑的会由 worker 自动领取", node.State)), nil
+			}
+			var payload map[string]any
+			if json.Unmarshal(node.Payload, &payload) != nil {
+				return actool.Errorf("意图 payload 无法解析"), nil
+			}
+			original := routeFromPayload(payload)
+			route := a.Route
+			if route == nil {
+				route = routeFromPayload(payload)
+			}
+			if route == nil {
+				return actool.Errorf("该意图没有路线信息：请传 route（入口/机制族/组件/参数）或改用 add_intent"), nil
+			}
+			if original == nil || routeIdentity(original.Entry, original.Family, original.Component, original.Parameter) != routeIdentity(route.Entry, route.Family, route.Component, route.Parameter) {
+				return actool.Errorf("续跑不得改变原意图的路线身份；新入口或机制请用 add_intent"), nil
+			}
+			parents := pidList(a.ParentIDs)
+			if len(parents) == 0 {
+				return actool.Errorf("parent_ids 必填：续跑必须引用此前未用于该路线的实质 fact/finding"), nil
+			}
+			states := t.routeStates()
+			state := states[routeIdentity(route.Entry, route.Family, route.Component, route.Parameter)]
+			if err := t.checkRouteContinuation(state, route, parents, a.RouteCap); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			consumed := appendUniqueInts(payloadRouteConsumed(payload), parents...)
+			runs := payloadRouteRuns(payload)
+			if runs < 1 {
+				runs = 1
+			}
+			runs++
+			prepared, err := t.ts.PrepareIntentContinuation(id)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if !prepared {
+				return actool.Errorf(fmt.Sprintf("意图 %d 状态已变化，未续跑", id)), nil
+			}
+			routePayload := map[string]any{}
+			if raw, err := json.Marshal(normalizedRoute(route)); err == nil {
+				_ = json.Unmarshal(raw, &routePayload)
+			}
+			if err := t.ts.UpdateIntentContinuation(id, routePayload, consumed, a.RouteCap, runs); err != nil {
+				_ = t.ts.RestoreIntentContinuation(node)
+				return actool.Errorf(err.Error()), nil
+			}
+			if err := t.continueWork(id, a.Message); err != nil {
+				_ = t.ts.RestoreIntentContinuation(node)
+				return actool.Errorf(err.Error()), nil
+			}
+			return actool.Text(fmt.Sprintf("intent %d 已续跑（按同路线预算计次）", id)), nil
+		})
+}
+
 // getWorkerOutput returns a work's final (or截至中止时的) conclusion text by intent id.
 func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 	return t.readExpTool("get_worker_output", "取本任务或直接关联任务某条意图(work)的最终输出结论。关联任务结果带 source_task_id/inherited=true 且只读。正常结束返回其总结；被终止(stopped)/异常的 work 返回其截至中止时的最后输出。",
@@ -2351,7 +2505,7 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
 		t.expandDigest(),
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
-		t.killWorkTool(), t.steerWorkTool(),
+		t.killWorkTool(), t.steerWorkTool(), t.continueIntent(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
 		t.addFinding(),
 		// list_companies：查看企业列表 + scope + 资产数（拿 company_id / 理解归属范围）。

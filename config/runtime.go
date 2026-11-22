@@ -10,6 +10,7 @@ type Runtime struct {
 	MCPConcurrency      int    `json:"mcp_concurrency"`
 	MCPFailureThreshold int    `json:"mcp_failure_threshold"`
 	MCPCooldownSeconds  int    `json:"mcp_cooldown_seconds"`
+	RouteCap            int    `json:"route_cap"` // 同一入口+机制族的最多执行意图数；0=默认 6
 	RecipeDir           string `json:"recipe_dir"`
 }
 
@@ -29,6 +30,9 @@ func RuntimeOptions() Runtime {
 	}
 	if r.MCPCooldownSeconds <= 0 {
 		r.MCPCooldownSeconds = 60
+	}
+	if r.RouteCap <= 0 {
+		r.RouteCap = 6
 	}
 	if r.RecipeDir == "" {
 		r.RecipeDir = filepath.Join(BaseDir(), "tools")

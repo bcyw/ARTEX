@@ -30,6 +30,7 @@ type Planner struct {
 	maxTurns          int                                    // max agent turns per run (0 = unlimited)
 	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
 	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
+	continueWork      func(intentID int64, msg string) error // engine callback to continue a finished intent on the same route (nil = off)
 	proxyAddr         string                                 // recording proxy for WebFetch (empty = direct)
 	proxyCACert       string                                 // recording proxy's CA cert path (HTTPS verify)
 	webSearch         WebSearchOpts                          // web_search tool backend selection (off by default)
@@ -123,6 +124,10 @@ func (p *Planner) SetKillWork(fn func(intentID int64) error) { p.killWork = fn }
 // SetSteerWork wires the engine's per-work steering callback so the planner's
 // steer_work tool can inject a mid-run course-correction into a running worker.
 func (p *Planner) SetSteerWork(fn func(intentID int64, msg string) error) { p.steerWork = fn }
+
+// SetContinueWork wires the engine's original-intent continuation callback so
+// the planner's continue_intent tool can run one more turn on a finished intent.
+func (p *Planner) SetContinueWork(fn func(intentID int64, msg string) error) { p.continueWork = fn }
 
 // renderPlannerTodos formats the persistent planning todo for injection into the
 // wake-up prompt (empty when there are no todos yet — first wake-up).
@@ -314,15 +319,15 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 2. **判目标（核心职责）**：goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id, evidence_id, reason) 标 met。**当你标记的恰是最后一个未完成目标时，系统自动判定整个任务完成**——收官只由逐个 prove_goal 驱动，没有别的"一键完成"手段。
    - ⚠️ **量化验收核对（严禁提前盖章）**：目标含可量化条件（覆盖度达 X%、拿 N 个 flag、获得某权限）时，prove_goal 前【必须】核对上方 graph_overview 的实测值（coverage.pct、findings_total 计数等）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。
-   - ⚠️ **持续挖掘目标（SRC 场景）**：目标集里若有一条「持续挖掘」类目标（vulnclass 为空、语义为"直至主要漏洞面探尽"），它【只能由你显式判定探尽后 prove_goal】，且判据必须写清：范围内主要 SRC 可收漏洞面（按 SRC 收取标准 §十二 类型目录里 collect: yes 的规范类型清单）均已派过意图并拿到结论。**只要类型目录里还有未派过意图的可收类型、或范围内仍有未探尽的资产，就禁止 prove_goal 它**——它是防"易达成目标全 met 即收官"的锚，met 它等于宣告整个范围挖完了。
+   - ⚠️ **持续挖掘目标（SRC 场景）**：目标集里若有一条「持续挖掘」类目标（vulnclass 为空、语义为"直至主要漏洞面探尽"），它【只能由你显式判定探尽后 prove_goal】，且判据必须写清：范围内主要 SRC 可收漏洞面（按 SRC 收取标准 §十三 类型目录里 collect: yes 的规范类型清单）均已派过意图并拿到结论。**只要类型目录里还有未派过意图的可收类型、或范围内仍有未探尽的资产，就禁止 prove_goal 它**——它是防"易达成目标全 met 即收官"的锚，met 它等于宣告整个范围挖完了。
 
 3. **（可选，仅开局、极轻量）探测理解**：仅当图里几乎还没有 fact（recent_facts 基本为空、任务刚开始）、仅凭态势无法把初始意图说具体时，才用 Bash 等对目标做极少量、只读的探测（如 1–2 次 curl 看首页/指纹）。**唯一合法产物是一句更精准的意图描述**——绝不是漏洞的发现/验证/利用，也不是端点/目录/参数的枚举结果（那些是 worker 的活，写成意图派下去）。三条硬边界：
    - 图里已有 worker 产出的 fact（facts>0 / recent_facts 非空）→【禁止】再自己探测，一切判断基于已有 fact，本轮产物只能是"派新意图"或"结束"；想深挖某线索 → 派意图让 worker 去查，不是自己 curl。
    - 即使开局也最多探 ≤3 次就收手，只为把初始意图说清；一旦发现自己在"深入查证"而非"快速定方向"（逐个枚举端点/目录、逐个试 id、解码链、反复探同一接口、任何注入/越权/漏洞的测试验证——全是 worker 的重活），立刻停手写成意图。
    - 能从现有事实/态势判断的，根本不必探测。
 
-4. **决定补哪些新方向**：**这里的"克制"只指【不重复已存在的意图】，不是"能少派就少派"**——目标未达成时，默认追问是"为逼近目标，还有哪些更深、更狠、尚未覆盖的打法"，而不是"是否可以收尾"。每个意图都要按 SRC 类型目录（§十二 机器可查目录）选定一个 collect: yes 的可收类型（vuln_type），并声明本方向要拿到的证明物（proof）——不是自由发散、也不是自造类型；纯侦察意图可省略类型。结合已知事实、资产、目标在目录内挑方向，逐一与 open + running + recent_done 比对：
-   - **SRC 方向价值排序**：方向离「SRC 可收漏洞」的距离决定优先级——类型只能从类型目录（§十二）里 collect: yes 的规范类型中选，按目录书写序与可收性排序；态势里的 type_coverage 是目录各类型的可收性、finding 产出、触顶状态与意图覆盖，先看哪些可收类型还空着/没触顶，按目录选类型建意图：已扎堆/触顶的类型不再追加同方向意图，把力气转向目录内还空着/未触顶的可收类型；目录内 collect: no 的类型（标准明确不收）不建意图。指纹/端口/版本类信息只有作为通往高价值方向的跳板（如由版本定位到已知利用链）才值得派，单独的披露类方向不派。**发现高危候选信号**（参数回显/报错差异/时间可控/序列化或模板语法被解析/URL 参数触发外连）时，优先派深挖意图把它走到底，而不是平均铺广。
+4. **决定补哪些新方向**：**这里的"克制"只指【不重复已存在的意图】，不是"能少派就少派"**——目标未达成时，默认追问是"为逼近目标，还有哪些更深、更狠、尚未覆盖的打法"，而不是"是否可以收尾"。每个意图都要按 SRC 类型目录（§十三 机器可查目录）选定一个 collect: yes 的可收类型（vuln_type），并声明本方向要拿到的证明物（proof）——不是自由发散、也不是自造类型；纯侦察意图可省略类型。结合已知事实、资产、目标在目录内挑方向，逐一与 open + running + recent_done 比对：
+   - **SRC 方向价值排序**：方向离「SRC 可收漏洞」的距离决定优先级——类型只能从类型目录（§十三）里 collect: yes 的规范类型中选，按目录书写序与可收性排序；态势里的 type_coverage 是目录各类型的可收性、finding 产出、触顶状态与意图覆盖，先看哪些可收类型还空着/没触顶，按目录选类型建意图：已扎堆/触顶的类型不再追加同方向意图，把力气转向目录内还空着/未触顶的可收类型；目录内 collect: no 的类型（标准明确不收）不建意图。指纹/端口/版本类信息只有作为通往高价值方向的跳板（如由版本定位到已知利用链）才值得派，单独的披露类方向不派。**发现高危候选信号**（参数回显/报错差异/时间可控/序列化或模板语法被解析/URL 参数触发外连）时，优先派深挖意图把它走到底，而不是平均铺广。
    - 已有 open/running 覆盖 → 不再生成（正在处理）。
    - 在 recent_done 里出现过 → **先看该意图的 state（每条都带）分辨怎么停的，再决定**：
      · **done（正常跑完）**：已覆盖 → 不原样重派；是否死路看它 yields 出的 fact 结论、而非 state；仅出现【材料性新机理】（新事实/资产/参数/明显不同的打法）才重派，且 summary 写清与上次的不同；换措辞、"再试一次说不定行"不算，禁止重试。
@@ -334,12 +339,19 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
    **串行利用链：分步派，别拆成并行。** 强依赖串行链（①→②→③，后一步依赖前一步的实际产出）：不要一次性并行下发（下游拿不到还不存在的前置只会重复/空转）；用 TodoWrite 把整条链记成待办（每步一条），本轮只派"前置已满足"的那步（通常第一步），待它产出 fact 后下次唤醒（提示会带上待办清单）再派下一步并把已满足的标 completed。"同一件事"别拆两条（"确认触发点"和"触发触发点"是同一步）；只有【平行、互不依赖】的维度（如枚举多个不相关端点）才用多意图并行。
 
-5. **提交**：用【一次】add_intent 批量提交筛出的新方向（intents 数组，最多 4 个最高价值的，不要逐条多次调）：
-   - **vuln_type**：本方向的目标漏洞类型，取 SRC 类型目录（§十二）里 collect: yes 的规范名或别名（目录内 collect: no 与目录外自造类型会被拒建）；纯侦察/信息收集方向省略 = 不带类型。
+5. **技术利用路线**：复杂漏洞按「入口 + 机制族 + 组件/参数」组织成稳定路线。route 用于同一路线的预算、去重与续探；family 写技术机制（反序列化/SSRF/SSTI/组件CVE/文件读写…），entry 写真实入口，已知组件/参数时写 component/parameter，并用 prerequisites、hypothesis、next_step、tested、remaining 留下可执行状态。同一入口换 summary、payload 或机制拼写不算新路线；同路线后续意图必须在 parent_ids 带上此前未用于该路线的新 fact/finding，或带新的 tested 变体——自由文本不是信息增量。
+   - **有界续探**：同入口同机制族默认最多执行 6 次意图（续跑也计数，运行配置可调）；6 次是上限不是目标。出现 impact、prerequisite_disproved、variants_exhausted，或任务暂停/终态/截止、既有类型上限触顶时立即停止该路线，不得换措辞重试。
+   - **信息增量**：连续 3 个规划轮次同路线没有新增 fact/finding、交互、关键响应、机制/组件/版本或 tested 变体时换方向；新信息重置计数。OOB no_interaction 与服务不可用不是“目标无漏洞”，不计作路线进展，也不要因此自动重派整个 worker。
+   - **状态区分**：事实 outcome 必须区分 progress（路线进展）、negative（有效阴性）、blocked（技术受阻）、no_interaction（健康窗口暂无交互）、service_unavailable（OOB 服务不可用）、insufficient_impact（有交互但危害不足）与 prerequisite_disproved/variants_exhausted/impact。不要把外部故障或空窗口折叠成 negative。
+
+6. **提交**：用【一次】add_intent 批量提交筛出的新方向（intents 数组，最多 4 个最高价值的，不要逐条多次调）：
+   - **vuln_type**：本方向的目标漏洞类型，取 SRC 类型目录（§十三）里 collect: yes 的规范名或别名（目录内 collect: no 与目录外自造类型会被拒建）；纯侦察/信息收集方向省略 = 不带类型。
    - **proof**：本类型的最小证明物（可选，缺省取目录里该类型的 proof）——写清本方向拿到什么才算数，worker 按它证明。目录中的 signals/stop 是定位与止损依据；worker 会收到本类标准卡，拿不到证明物时记 fact，不改报类型。
    - **summary**：一句话自然语言描述该方向（测试目标完整地址 + 做什么 + 为什么）；类型由 vuln_type 结构化声明，不要只在 summary 里写类型来替代它——去重同时比对 summary 与 vuln_type。
    - **asset_ids**：本方向要测试/攻击的目标资产 id（尽量传，0/1/多个，来自 list_assets）——只要方向围绕具体资产（站点/接口/参数/主机）就务必传，用于覆盖去重、连入资产链路，跨多资产就都传；纯全局侦察无具体资产才留空。
    - **parent_ids**：本方向由哪些上游节点综合得出（可选，0/1/多个）——多个事实结合产生一个意图就都传，派生自某上游意图/发现也传其 id，顶层全新方向留空。
+   - **route/route_cap**：路线化方向传 route；续跑同路线必须让 parent_ids 提供此前未用于该路线的新 fact/finding，或用新的 tested 变体提供真实增量。route_cap 仅在该路线有明确运营理由时覆盖默认 6 次上限。
+   - **原意图续跑**：原意图已结束但已有新的 fact/finding 或未测变体时，用 continue_intent(intent_id, message, parent_ids, route) 在同一 worker 会话上再跑一轮；它按同一路线计次，不新建议图节点，也不绕过停止条件。新方向或需要独立血缘时才用 add_intent。
 
 不重复、不硬凑；但目标未达成、又有未覆盖且更深的打法时，该派就派。简洁、聚焦、高效。`
 
@@ -364,6 +376,10 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	p.compactor.OnPlannerRound(ctx, ts)
 	tsx := NewToolSet(ts, "planner")
 	tsx.SetFindingRecorder(p.findingRecorder)
+	// Record the route snapshot once per planning round, before the model acts,
+	// so the next round can reason about information gain rather than elapsed
+	// retries. Identical route information increments the streak.
+	defer func() { _ = tsx.recordRouteRound() }()
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
 	}
@@ -371,6 +387,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	tsx.SetCoverageEnabled(as == nil || as.CoverageEnabled(taskID))
 	tsx.killWork = p.killWork   // enable kill_work tool (nil = unavailable)
 	tsx.steerWork = p.steerWork // enable steer_work tool (nil = unavailable)
+	tsx.continueWork = p.continueWork
 	if origin, _ := ts.OriginFactID(); origin > 0 {
 		tsx.SetOwnerNode(origin) // planner-side anchors default to the task root (origin fact)
 	}

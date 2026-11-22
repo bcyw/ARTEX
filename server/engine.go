@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -83,6 +84,8 @@ func retryableWorkerModelError(reason harness.TerminalReason, err error) bool {
 type Engine struct {
 	m        *Manager
 	debounce time.Duration
+	rootMu   sync.RWMutex
+	rootCtx  context.Context
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
@@ -386,6 +389,7 @@ func (e *Engine) touch(taskID string) { e.lastAct.Store(taskID, time.Now().Unix(
 
 func NewEngine(m *Manager) *Engine {
 	return &Engine{m: m, debounce: 800 * time.Millisecond, bc: NewBroadcaster(),
+		rootCtx:    context.Background(),
 		execCancel: map[string]context.CancelCauseFunc{}, execCtx: map[string]context.Context{},
 		work: map[int64]*workExecution{}, steerBox: map[int64][]string{},
 		runtimes: map[string]*taskRuntime{}}
@@ -630,6 +634,64 @@ func (e *Engine) KillWork(intentID int64) error {
 	return nil
 }
 
+// ContinueWork queues one more turn on the original intent. The ordinary worker
+// pool supplies admission, concurrency and lifecycle controls.
+func (e *Engine) ContinueWork(intentID int64, msg string) error {
+	if strings.TrimSpace(msg) == "" {
+		return fmt.Errorf("续跑消息不能为空")
+	}
+	e.workMu.Lock()
+	running := e.work[intentID] != nil
+	e.workMu.Unlock()
+	if running {
+		return fmt.Errorf("意图 %d 正在运行中；实时纠偏请用 steer_work", intentID)
+	}
+	t := e.taskForIntent(intentID)
+	if t == nil {
+		return fmt.Errorf("意图 %d 不属于任何活动任务", intentID)
+	}
+	if e.IsDeleting(t.ID) {
+		return fmt.Errorf("任务正在删除，无法续跑意图")
+	}
+	if e.IsPaused(t.ID) || e.isSettling(t.ID) {
+		return fmt.Errorf("任务已暂停或正在收尾，无法续跑意图")
+	}
+	if isTerminalStatus(t.lifecycleSnapshot().Status) {
+		return fmt.Errorf("终态任务无法续跑意图")
+	}
+	return t.Store.QueueIntentContinuation(intentID, msg)
+}
+
+func (e *Engine) setRootContext(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	e.rootMu.Lock()
+	e.rootCtx = ctx
+	e.rootMu.Unlock()
+}
+
+func (e *Engine) rootContext() context.Context {
+	e.rootMu.RLock()
+	defer e.rootMu.RUnlock()
+	if e.rootCtx == nil {
+		return context.Background()
+	}
+	return e.rootCtx
+}
+
+func (e *Engine) taskForIntent(intentID int64) *Task {
+	if e == nil || e.m == nil {
+		return nil
+	}
+	for _, t := range e.m.List() {
+		if n, err := t.Store.GetNode(intentID); err == nil && n != nil && n.Kind == db.KindIntent {
+			return t
+		}
+	}
+	return nil
+}
+
 // Broadcaster exposes the engine's live activity pub/sub (used by the SSE handler).
 func (e *Engine) Broadcaster() *Broadcaster { return e.bc }
 
@@ -744,6 +806,7 @@ func (e *Engine) ReadyFor(t *Task) bool {
 // but no-op until an LLM is configured (so a task created while idle picks up
 // automatically once LLM is set from the UI).
 func (e *Engine) Run(ctx context.Context, t *Task) {
+	e.setRootContext(ctx)
 	workers := e.m.Workers()
 	e.deleteMu.RLock()
 	if e.IsDeleting(t.ID) {
@@ -966,7 +1029,16 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 		return false
 	}
 	log.Printf("[worker %s] task %s 领取意图 #%d", name, t.ID, intent.ID)
-	return e.runIntent(ctx, t, name, worker, intent, "", "")
+	var payload struct {
+		Message string `json:"continuation_message"`
+		Runs    int    `json:"route_runs"`
+	}
+	_ = json.Unmarshal(intent.Payload, &payload)
+	requestID := ""
+	if payload.Message != "" {
+		requestID = fmt.Sprintf("route-%d-%d", intent.ID, payload.Runs)
+	}
+	return e.runIntent(ctx, t, name, worker, intent, requestID, payload.Message)
 }
 
 // runIntent executes and fully settles one already-claimed (state=running) intent.
@@ -1022,6 +1094,11 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 	}
 	e.EndLLMCall(t.ID)
+	if strings.HasPrefix(requestID, "route-") {
+		if err := t.Store.ClearIntentContinuation(intent.ID); err != nil {
+			log.Printf("[worker %s] clear continuation: %v", name, err)
+		}
+	}
 	// model_error 收场 → 额外重跑几次（退避后再试）。仅在意图仍属本 work、任务
 	// 未暂停/未终止/未取消【且未进入收尾】时重试；否则让位给对应分支处理(收尾期不
 	// 再重试,避免退避挤占其他 worker 的优雅收尾窗口)。

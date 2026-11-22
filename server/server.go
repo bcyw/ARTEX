@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/llmpool"
@@ -149,6 +150,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// SRC 漏洞收取标准的磁盘覆盖路径：<BaseDir>/standards/src-acceptance.md。
 	// 文件缺失/不可读时用代码内嵌默认,故无需先确认存在。
 	agent.SrcAcceptancePath(filepath.Join(keyDir, "standards", "src-acceptance.md"))
+	agent.SetRouteCapResolver(func() int { return config.RuntimeOptions().RouteCap })
 	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},

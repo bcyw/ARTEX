@@ -14,8 +14,8 @@ func TestMiningStandardsPromptReseed(t *testing.T) {
 	}{
 		{"goals", "goals_prompt_src_mining_v4", s.reseedGoalsPrompt},
 		{"mainagent", "mainagent_prompt_src_mining_v3", s.reseedMainAgentPrompt},
-		{"planner", "planner_prompt_src_mining_v5", s.reseedPlannerPrompt},
-		{"worker", "worker_prompt_src_mining_v7", s.reseedWorkerPrompt},
+		{"planner", "planner_prompt_src_mining_v6", s.reseedPlannerPrompt},
+		{"worker", "worker_prompt_src_mining_v8", s.reseedWorkerPrompt},
 		{"pentest", "pentest_prompt_src_mining_v3", s.reseedPentestPrompt},
 	} {
 		t.Run(tc.key, func(t *testing.T) {

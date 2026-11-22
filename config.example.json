@@ -13,6 +13,7 @@
     "mcp_concurrency": 5,
     "mcp_failure_threshold": 5,
     "mcp_cooldown_seconds": 60,
+    "route_cap": 6,
     "recipe_dir": ""
   }
 }
