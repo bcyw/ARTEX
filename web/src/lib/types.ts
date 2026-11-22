@@ -559,6 +559,19 @@ export interface FindingStats {
   low: number;
   vulnclasses: string[];
   tasks: FindingTaskOption[];
+  // 类型分布:后端呈现层已按规范桶折叠(别名合并),每桶带总数/已确认数与
+  // 桶内原始写法清单(把桶选项展开成列表筛选的多值条件)。缺省为空数组——
+  // 旧字段不动,vulnclasses 保持原始写法清单(选中项校验兼容)。
+  vulnclass_counts?: FindingVulnClassCount[];
+}
+
+// FindingVulnClassCount 是类型分布里一个规范桶的计数行:总数 + 已确认数;
+// values 是该桶覆盖的原始写法(mock/旧档无该字段时回退用桶名单值筛选)。
+export interface FindingVulnClassCount {
+  vulnclass: string;
+  count: number;
+  confirmed: number;
+  values?: string[];
 }
 
 // FindingTaskOption 是发现页「按任务」筛选下拉的一项:有漏洞的任务(描述为空表示任务已删除,

@@ -74,13 +74,14 @@ func TestFindingsPageAndStats(t *testing.T) {
 	cleanup()
 	defer cleanup()
 
-	// Seed 6 findings under the marker vulnclass: 1 critical, 3 high, 2 low; 2 pending.
-	// The critical row carries a name to verify round-trip.
+	// Seed 6 findings under the marker vulnclass: 1 critical, 3 high, 2 low; 2 pending,
+	// 1 confirmed (供类型分布的 confirmed 计数断言), 3 resolved. The critical row
+	// carries a name to verify round-trip.
 	seed := []struct {
 		sev, status, name string
 	}{
 		{"critical", "pending", "严重漏洞标题"},
-		{"high", "resolved", ""},
+		{"high", "confirmed", ""},
 		{"high", "resolved", ""},
 		{"high", "pending", ""},
 		{"low", "resolved", ""},
@@ -138,6 +139,31 @@ func TestFindingsPageAndStats(t *testing.T) {
 		t.Fatalf("high filter: want 3, got %d", total)
 	}
 
+	// 逗号多值筛选:选中的「规范桶」由呈现层展开成多个原始写法(桶内别名),
+	// 列表/分组/资产树/导出共用这份 where,所以这里直接测多值语义。空段忽略。
+	const vc2 = "__test_vc_second__"
+	id2, err := d.AddFinding(0, 0, vc2, "", "high", "summary", "poc", "tester", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM findings WHERE vulnclass=$1`, vc2) })
+	multi, multiTotal, err := d.ListFindingsPage(FindingFilter{VulnClass: vc + " , " + vc2 + ","}, 1, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if multiTotal != 7 || len(multi) != 7 {
+		t.Fatalf("multi vulnclass filter: want 7/7, got %d/%d", multiTotal, len(multi))
+	}
+	// 多值不含未列出的类型。
+	only2, only2Total, err := d.ListFindingsPage(FindingFilter{VulnClass: vc2}, 1, 50)
+	if err != nil || only2Total != 1 || len(only2) != 1 || only2[0].ID != id2 {
+		t.Fatalf("single vulnclass filter after multi: %+v total=%d err=%v", only2, only2Total, err)
+	}
+	_, multiGroupTotal, multiFindingTotal, err := d.ListFindingGroups(FindingFilter{VulnClass: vc + "," + vc2}, 1, 10)
+	if err != nil || multiFindingTotal != 7 {
+		t.Fatalf("multi vulnclass groups: findings=%d groups=%d err=%v", multiFindingTotal, multiGroupTotal, err)
+	}
+
 	// Stats: whole-table, so assert our contribution is reflected (>=) and the
 	// marker vulnclass is present.
 	st, err := d.FindingStats()
@@ -152,6 +178,30 @@ func TestFindingsPageAndStats(t *testing.T) {
 	}
 	if !slices.Contains(st.VulnClasses, vc) {
 		t.Fatalf("stats vulnclasses missing %q", vc)
+	}
+
+	// 类型分布:per-vulnclass 结构。本测试贡献 6 行(1 confirmed),断言按 >= 风格。
+	var vcRow *FindingVulnClassCount
+	for i := range st.VulnClassCounts {
+		if st.VulnClassCounts[i].VulnClass == vc {
+			vcRow = &st.VulnClassCounts[i]
+		}
+	}
+	if vcRow == nil {
+		t.Fatalf("stats vulnclass_counts missing %q: %+v", vc, st.VulnClassCounts)
+	}
+	if vcRow.Count < 6 {
+		t.Fatalf("stats vulnclass_counts %q count=%d, want >= 6", vc, vcRow.Count)
+	}
+	if vcRow.Confirmed != 1 {
+		t.Fatalf("stats vulnclass_counts %q confirmed=%d, want exactly 1", vc, vcRow.Confirmed)
+	}
+	// 降序契约:计数多的类型排前面(并列时按名字升序)。
+	for i := 1; i < len(st.VulnClassCounts); i++ {
+		prev, cur := st.VulnClassCounts[i-1], st.VulnClassCounts[i]
+		if prev.Count < cur.Count || (prev.Count == cur.Count && prev.VulnClass > cur.VulnClass) {
+			t.Fatalf("stats vulnclass_counts not sorted (count desc, name asc): %+v", st.VulnClassCounts)
+		}
 	}
 
 	// GetFinding: single-row fetch round-trips id/name/severity.

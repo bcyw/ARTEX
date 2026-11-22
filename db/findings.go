@@ -47,10 +47,11 @@ const (
 	FindingIgnored       = "ignored"        // 忽略
 	FindingDuplicate     = "duplicate"      // 重复
 	FindingRiskAccepted  = "risk_accepted"  // 风险接受
-	// FindingQuarantined 是 SRC 黑名单硬闸的隔离区：report_finding 命中黑名单且
-	// 无升级证据时入库到此状态,供人工检查——不删除(避免静默丢失)、不进交付
-	// 报告(报告只取 confirmed)。人工核实确有升级证据后可改回 pending/confirmed。
-	FindingQuarantined = "quarantined" // 隔离(黑名单拦截)
+	// FindingQuarantined 是历史语义：旧版词表闸（agent 层 SrcFindingBlocked）的
+	// 隔离区状态。新代码已改用类型目录（collect:false 直接拒收）不再产生此状态，
+	// 该常量仅为保留存量数据的查询/展示与人工放行路径；人工核实确有升级证据后
+	// 可改回 pending/confirmed。
+	FindingQuarantined = "quarantined" // 隔离(旧版词表闸历史状态)
 )
 
 // ValidFindingStatus reports whether s is a known triage state.
@@ -190,7 +191,28 @@ func (f FindingFilter) where() (string, []any) {
 	}
 	add("severity", f.Severity)
 	add("status", f.Status)
-	add("vulnclass", f.VulnClass)
+	// vulnclass 筛选:含逗号 = 多值 IN(呈现层把选中的规范桶展开成桶内原始写法
+	// 清单传入;空段忽略),单值保持精确匹配不变。
+	if f.VulnClass != "" {
+		if parts := strings.Split(f.VulnClass, ","); len(parts) > 1 {
+			var vals []string
+			for _, part := range parts {
+				if part = strings.TrimSpace(part); part != "" {
+					vals = append(vals, part)
+				}
+			}
+			if len(vals) > 0 {
+				placeholders := make([]string, len(vals))
+				for i, val := range vals {
+					args = append(args, val)
+					placeholders[i] = fmt.Sprintf("$%d", len(args))
+				}
+				conds = append(conds, fmt.Sprintf("f.vulnclass IN (%s)", strings.Join(placeholders, ", ")))
+			}
+		} else {
+			add("vulnclass", f.VulnClass)
+		}
+	}
 	// task_id 是 bigint 列,按整数比较(不能走上面的文本 add);空/非法值忽略。
 	if f.TaskID == FindingUnassignedTask {
 		conds = append(conds, "(f.task_id IS NULL OR t.id IS NULL)")
@@ -536,6 +558,21 @@ type FindingStats struct {
 	Low         int                 `json:"low"`
 	VulnClasses []string            `json:"vulnclasses"`
 	Tasks       []FindingTaskOption `json:"tasks"` // 有漏洞的任务(供「按任务」下拉)
+	// VulnClassCounts 是类型分布:每个 vulnclass 一行,带总数与已确认数(票 05)。
+	// db 层按原始写法逐行计数(后端原始计数可查);呈现层的规范桶合并由消费方
+	// 做成(见 server 的 stats 折叠),冷档聚合则按原始写法累加进本结构。字段
+	// additive:旧任务归档的 finding_stats 无此键,反序列化自动忽略,不回归。
+	VulnClassCounts []FindingVulnClassCount `json:"vulnclass_counts"`
+}
+
+// FindingVulnClassCount 是类型分布里一个 vulnclass 的计数行:总数 + 已确认数
+// (status='confirmed')。Values 由呈现层折叠时回填(该桶覆盖的原始写法清单,
+// 供前端把桶选项展开成列表筛选条件),db 聚合输出不填。
+type FindingVulnClassCount struct {
+	VulnClass string   `json:"vulnclass"`
+	Count     int      `json:"count"`
+	Confirmed int      `json:"confirmed"`
+	Values    []string `json:"values,omitempty"`
 }
 
 // FindingTaskOption is one entry in the 发现 page's 任务 filter: a task that has at
@@ -549,10 +586,10 @@ type FindingTaskOption struct {
 	Count       int    `json:"count"`
 }
 
-// FindingStats returns whole-table counts (by severity + pending) and the sorted
-// set of distinct vuln classes.
+// FindingStats returns whole-table counts (by severity + pending), the sorted
+// set of distinct vuln classes, and per-vulnclass counts (total + confirmed).
 func (d *DB) FindingStats() (*FindingStats, error) {
-	st := &FindingStats{VulnClasses: []string{}, Tasks: []FindingTaskOption{}}
+	st := &FindingStats{VulnClasses: []string{}, Tasks: []FindingTaskOption{}, VulnClassCounts: []FindingVulnClassCount{}}
 	err := d.QueryRow(`SELECT
 		COUNT(*),
 		COUNT(*) FILTER (WHERE status = 'pending'),
@@ -577,6 +614,25 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 		st.VulnClasses = append(st.VulnClasses, vc)
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// 类型分布:每个 vulnclass 一行,总数 + 已确认数,计数降序(并列按名字升序)。
+	crows, err := d.Query(`SELECT vulnclass, COUNT(*), COUNT(*) FILTER (WHERE status = 'confirmed')
+		FROM findings WHERE vulnclass <> ''
+		GROUP BY vulnclass ORDER BY COUNT(*) DESC, vulnclass`)
+	if err != nil {
+		return nil, err
+	}
+	defer crows.Close()
+	for crows.Next() {
+		var row FindingVulnClassCount
+		if err := crows.Scan(&row.VulnClass, &row.Count, &row.Confirmed); err != nil {
+			return nil, err
+		}
+		st.VulnClassCounts = append(st.VulnClassCounts, row)
+	}
+	if err := crows.Err(); err != nil {
 		return nil, err
 	}
 
@@ -609,6 +665,13 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 	for _, vulnclass := range st.VulnClasses {
 		vulnclasses[vulnclass] = true
 	}
+	// 冷档类型分布按原始写法累加(旧档 finding_stats 无 vulnclass_counts 键 →
+	// 空切片,循环体不执行,additive 兼容)。
+	vulnclassCounts := make(map[string]*FindingVulnClassCount, len(st.VulnClassCounts))
+	for i := range st.VulnClassCounts {
+		row := st.VulnClassCounts[i]
+		vulnclassCounts[row.VulnClass] = &row
+	}
 	for _, aggregate := range archived {
 		cold := aggregate.FindingStats
 		st.Total += cold.Total
@@ -622,12 +685,34 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 				vulnclasses[vulnclass] = true
 			}
 		}
+		for _, coldRow := range cold.VulnClassCounts {
+			if coldRow.VulnClass == "" {
+				continue
+			}
+			if entry, ok := vulnclassCounts[coldRow.VulnClass]; ok {
+				entry.Count += coldRow.Count
+				entry.Confirmed += coldRow.Confirmed
+			} else {
+				row := coldRow
+				vulnclassCounts[row.VulnClass] = &row
+			}
+		}
 	}
 	st.VulnClasses = st.VulnClasses[:0]
 	for vulnclass := range vulnclasses {
 		st.VulnClasses = append(st.VulnClasses, vulnclass)
 	}
 	sort.Strings(st.VulnClasses)
+	st.VulnClassCounts = st.VulnClassCounts[:0]
+	for _, row := range vulnclassCounts {
+		st.VulnClassCounts = append(st.VulnClassCounts, *row)
+	}
+	sort.Slice(st.VulnClassCounts, func(i, j int) bool {
+		if st.VulnClassCounts[i].Count != st.VulnClassCounts[j].Count {
+			return st.VulnClassCounts[i].Count > st.VulnClassCounts[j].Count
+		}
+		return st.VulnClassCounts[i].VulnClass < st.VulnClassCounts[j].VulnClass
+	})
 	return st, nil
 }
 

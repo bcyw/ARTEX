@@ -126,7 +126,17 @@ const EMPTY_STATS: FindingStats = {
   low: 0,
   vulnclasses: [],
   tasks: [],
+  vulnclass_counts: [],
 };
+
+// vulnclassOptions 列出类型筛选的合法取值:有类型分布(规范桶)时用桶名,
+// 否则回退原始写法清单(旧 mock/旧档兼容)。选中项校验与下拉选项共用。
+function vulnclassOptions(stats: FindingStats): string[] {
+  if (stats.vulnclass_counts?.length) {
+    return stats.vulnclass_counts.map((bucket) => bucket.vulnclass);
+  }
+  return stats.vulnclasses ?? [];
+}
 
 export default function FindingsPage() {
   const [view, setView] = React.useState<FindingView>("flat");
@@ -286,7 +296,7 @@ export default function FindingsPage() {
       await api.exportFindings({
         format: exportFormat,
         scope: exportScope,
-        filters: { severity, status, vulnclass, task, query, sort },
+        filters: { severity, status, vulnclass: vulnclassParam, task, query, sort },
         ids: [...selectedIds],
       });
       setExportOpen(false);
@@ -306,10 +316,30 @@ export default function FindingsPage() {
   const expandedGroupsRef = React.useRef(expandedGroups);
   const groupFindingsRef = React.useRef(groupFindings);
   const visibleGroupKeysRef = React.useRef<Set<string>>(new Set());
+  const statsRef = React.useRef(stats);
   flatStateRef.current = flat;
   expandedGroupsRef.current = expandedGroups;
   groupFindingsRef.current = groupFindings;
   visibleGroupKeysRef.current = new Set(groups.map(findingGroupKey));
+  statsRef.current = stats;
+
+  // 类型筛选可能是「规范桶」(服务端把别名折叠后的桶名,stats.vulnclass_counts
+  // 的 vulnclass 字段)而非某个原始写法。发请求前把选中的桶展开成桶内原始写法
+  // 清单(逗号串,后端 IN 匹配);桶无 values(旧 mock/旧档)或未命中时回退原值
+  // 精确匹配。读 statsRef 镜像,不必把 stats 加进各加载回调的依赖。
+  const vulnclassFilterValue = React.useCallback(
+    (selected: string): string => {
+      if (selected === "all") return selected;
+      for (const bucket of statsRef.current.vulnclass_counts ?? []) {
+        if (bucket.vulnclass === selected && bucket.values?.length) {
+          return bucket.values.join(",");
+        }
+      }
+      return selected;
+    },
+    [],
+  );
+  const vulnclassParam = vulnclassFilterValue(vulnclass);
 
   // 资产视图右侧列表 = 平铺列表 + 选中子树的筛选,所以两个视图共用一份列表状态。
   const activeAssetScope = view === "asset" ? assetScope : null;
@@ -326,7 +356,7 @@ export default function FindingsPage() {
         pageSize: flatPageSize,
         severity,
         status,
-        vulnclass,
+        vulnclass: vulnclassParam,
         task,
         query,
         sort,
@@ -339,7 +369,7 @@ export default function FindingsPage() {
       // Polling keeps the last successful snapshot visible.
       setFlat((current) => ({ ...current, loading: false }));
     }
-  }, [activeAssetScope, filterFingerprint, flatPage, flatPageSize, severity, status, vulnclass, task, query, sort]);
+  }, [activeAssetScope, filterFingerprint, flatPage, flatPageSize, severity, status, vulnclassParam, task, query, sort]);
 
   // loadAssetTree 取整棵资产树。树不随选中节点变化(否则选一下就塌成一条链),
   // 所以这里不带 assetScope。
@@ -349,7 +379,7 @@ export default function FindingsPage() {
     const request = ++assetTreeRequest.current;
     setAssetTree((current) => ({ ...current, loading: true }));
     try {
-      const result = await api.findingAssetTree({ severity, status, vulnclass, task, query, sort });
+      const result = await api.findingAssetTree({ severity, status, vulnclass: vulnclassParam, task, query, sort });
       if (request !== assetTreeRequest.current || activeFilterFingerprint.current !== requestFilter) return;
       setAssetTree({
         nodes: result.nodes ?? [],
@@ -364,7 +394,7 @@ export default function FindingsPage() {
       setAssetTree((current) => ({ ...current, loading: false }));
       toast.error(`资产树加载失败：${(e as Error).message}`);
     }
-  }, [filterFingerprint, severity, status, vulnclass, task, query, sort]);
+  }, [filterFingerprint, severity, status, vulnclassParam, task, query, sort]);
 
   const refreshGroups = React.useCallback(async () => {
     const requestFilter = filterFingerprint;
@@ -376,7 +406,7 @@ export default function FindingsPage() {
         pageSize,
         severity,
         status,
-        vulnclass,
+        vulnclass: vulnclassParam,
         task,
         query,
         sort,
@@ -388,7 +418,7 @@ export default function FindingsPage() {
     } catch {
       // Polling keeps the last successful snapshot visible.
     }
-  }, [filterFingerprint, page, pageSize, severity, status, vulnclass, task, query, sort]);
+  }, [filterFingerprint, page, pageSize, severity, status, vulnclassParam, task, query, sort]);
 
   const loadGroup = React.useCallback(
     async (key: string, groupPage: number, groupPageSize: number) => {
@@ -413,7 +443,7 @@ export default function FindingsPage() {
           pageSize: groupPageSize,
           severity,
           status,
-          vulnclass,
+          vulnclass: vulnclassParam,
           task: key,
           query,
           sort,
@@ -447,7 +477,7 @@ export default function FindingsPage() {
         }));
       }
     },
-    [filterFingerprint, severity, status, vulnclass, query, sort],
+    [filterFingerprint, severity, status, vulnclassParam, query, sort],
   );
 
   React.useEffect(() => {
@@ -589,7 +619,12 @@ export default function FindingsPage() {
 
   React.useEffect(() => {
     if (!statsLoaded) return;
-    if (vulnclass !== "all" && !stats.vulnclasses.includes(vulnclass)) setVulnclass("all");
+    // 选中项校验:类型下拉的选项现在是「规范桶」(vulnclass_counts),旧数据/旧
+    // mock 无分布时回退原始清单(vulnclasses)。两份清单任一含选中值即有效——
+    // 既有 vulnclasses 依赖由此保持兼容,不回归。
+    if (vulnclass !== "all" && !vulnclassOptions(stats).some((option) => option === vulnclass)) {
+      setVulnclass("all");
+    }
     if (
       task !== "all" &&
       task !== UNASSIGNED_TASK &&
@@ -904,11 +939,28 @@ export default function FindingsPage() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部类型</SelectItem>
-              {stats.vulnclasses.map((vc) => (
-                <SelectItem key={vc} value={vc}>
-                  {vc}
-                </SelectItem>
-              ))}
+              {stats.vulnclass_counts?.length ? (
+                stats.vulnclass_counts.map((bucket) => (
+                  <SelectItem key={bucket.vulnclass} value={bucket.vulnclass}>
+                    <span className="flex w-full items-center gap-2">
+                      <span className="max-w-[10rem] truncate" title={bucket.vulnclass}>
+                        {bucket.vulnclass}
+                      </span>
+                      <span className="inline-flex items-center gap-1 text-muted-foreground tabular-nums">
+                        <BugIcon className="size-3.5" aria-hidden="true" />
+                        {bucket.count}
+                        {bucket.confirmed > 0 && <span title="已确认">已确认 {bucket.confirmed}</span>}
+                      </span>
+                    </span>
+                  </SelectItem>
+                ))
+              ) : (
+                stats.vulnclasses.map((vc) => (
+                  <SelectItem key={vc} value={vc}>
+                    {vc}
+                  </SelectItem>
+                ))
+              )}
             </SelectContent>
           </Select>
 

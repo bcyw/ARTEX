@@ -93,7 +93,7 @@ CI enforces that Unix shell scripts are LF without BOM and `start.bat` is ASCII 
 - Support packages: `traffic/` MITM recorder, `intercept/` + `guard/` approval gate, `enrich/` async DNS/HTTP completion, `llmpool/` LLM failover, `llmrec/` request recording, `mcphttp/` remote MCP, `notify/`, `report/`, `evidence/`, `selfupdate/`.
 - `web/src/app` — App Router; `@/*` alias maps to `web/src/*`; UI copy is Chinese.
 - `skills/` runtime agent skills; `tools/*.yaml` strict-argv tool recipes (see `tools/README.md`).
-- `standards/src-acceptance.md` SRC 漏洞收取标准（黑名单/证据线/定级纪律）。启动时读入注入到能产出 finding 的 agent 提示（代码固定段，不受 DB 模板影响）；黑名单同时在 `agent/srcstandards.go` 的 `SrcFindingBlocked` 做入库硬闸（命中且无「升级证据」→ `findings.status='quarantined'` 隔离区，不进交付报告）。改口径直接改该文件即可，无需重编译。
+- `standards/src-acceptance.md` SRC 漏洞收取标准（类型目录/证据线/定级纪律），以代码固定段注入能产出 finding 的 agent 提示，不受 DB 模板影响。文末 `~~~types` 目录是唯一机器来源：planner 选可收类型建意图，worker 按标准卡取证，上报类型与意图锚定；`collect: no` 规划拒建、上报拒收并引导 fact。热改后下次读取即生效，无需重编译或重启；修改标准时同步 `agent/srcstandards.go` 内嵌副本。
 
 ### Dual graph
 

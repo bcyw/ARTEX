@@ -234,7 +234,7 @@ const workerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 2. 初次受阻（payload 被过滤 / 404 / 注入无回显）不代表已探透——把本意图的所有绕过手段走完再输出结论；
 3. 只在授权范围内操作。系统提示顶部若附【操作约束】，那是最高优先级红线：每条命令/探测执行前先自检，违反即不做（哪怕它落在你领到的意图里）。
 
-**SRC 挖掘的完成标准**：本意图指向某类漏洞时，**走透 = 挖到实际危害**——注入点找到≠完成，要实际触发并拿到数据/回显；接口未授权≠完成，要确认它返回业务敏感数据；越权嫌疑≠完成，要展示另一账户的真实数据；反序列化点发现≠完成，要实际执行命令或等价危害。只走到"疑似存在"就收手，等于把 SRC 可收的漏洞留在了半路。触发不了才如实记 inferred 事实交规划者。
+**SRC 挖掘的完成标准**：动手前先读本意图附带的【本类标准卡】，按 proof 拿证明物、按 signals 定位入口、按 stop 止损。类型已在规划期确定，report_finding 传本意图 intent_id，vulnclass 可省略沿用意图类型；显式填写须与意图类型一致，不得换类型上报。拿不到证明物就 record_fact 记录已试手段与观察。本意图指向某类漏洞时，**走透 = 挖到实际危害**——候选点找到≠完成，要实际触发并拿到该类型收取标准里的「危害最小证明物」（实际数据/回显/操作影响，见上方收取标准）。只走到"疑似存在"就收手，等于把 SRC 可收的漏洞留在了半路。触发不了才如实记 inferred 事实交规划者。
 
 **技能（Skill）使用纪律**：工具列表里有 Skill 元工具时，其描述内嵌了可用技能清单。**任务匹配某个技能的适用场景时，先调 Skill(name) 载入其操作指引再动手**——技能正文是该场景下久经验证的流程（脚本用法、边界、门禁），比现场摸索快且不易越界。典型时机：开局铺 API 攻击面、需要真实浏览器渲染/交互、操作外部扫描平台。载入后按其指引执行；技能指引与操作约束冲突时，操作约束优先。
 
@@ -317,8 +317,59 @@ func intentAssetIDs(intent *db.Node) []int64 {
 	return p.AssetIDs
 }
 
+// intentTypePayload 是任务书标准卡需要从意图 payload 读取的字段（票 02 契约）：
+// vuln_type 是规划期确定的规范类型名（可写作别名），proof 是该意图具体的危害
+// 最小证明物。两者都可缺省：payload 无 vuln_type = 纯侦察意图，不加卡。
+type intentTypePayload struct {
+	VulnType string `json:"vuln_type"`
+	Proof    string `json:"proof"`
+}
+
 func renderIntentTask(intent *db.Node) string {
-	return fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", string(intent.Payload), intent.ID)
+	task := fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", string(intent.Payload), intent.ID)
+	var p intentTypePayload
+	if err := json.Unmarshal(intent.Payload, &p); err != nil {
+		return task // 非法 JSON：保持原文渲染，不因解析失败挡住 worker
+	}
+	return task + intentTypeCard(p.VulnType, p.Proof)
+}
+
+// intentTypeCard renders 「本类标准卡」 after the intent text: the type's canonical
+// name, minimal-proof artefact, trigger heuristics, stop line and discipline. All
+// type content comes from the hot-reloaded catalog (票 01) — this function holds
+// zero vuln-type literals (ADR-0004). vulnType empty (recon intent) → no card.
+//
+// 目录里查不到该类型（热改后目录删了条目的历史意图）：不加卡、不报错，保持原文
+// 渲染（票 04 ③），不凭空编造启发式与止损线。
+func intentTypeCard(vulnType, proof string) string {
+	name := strings.TrimSpace(vulnType)
+	if name == "" {
+		return ""
+	}
+	const discipline = "\n【纪律】类型已在规划期确定，不得改报其他类型；拿不出上述证明物就不成立，不要报 finding——把已试手段与观察写进 record_fact（传本意图 id）。"
+	e, ok := srcCatalog().lookup(name)
+	if !ok {
+		return ""
+	}
+	card := "\n\n【本类标准卡（动手前按卡证明，拿不出证明物不成立）】" +
+		"\n【本方向的漏洞类型】" + e.Name
+	card += "\n【拿什么才算数（危害最小证明物）】" + firstNonEmpty(proof, e.Proof, srcCardFallback)
+	card += "\n【触发启发式】" + firstNonEmpty(e.Signals, srcCardFallback)
+	card += "\n【止损线】" + firstNonEmpty(e.Stop, srcCardFallback)
+	return card + discipline
+}
+
+// srcCardFallback 是目录条目缺字段时的中性占位文案（不含任何类型语义）。
+const srcCardFallback = "目录未给出，按上方收取标准判断"
+
+// firstNonEmpty 返回第一个去空白后非空的候选，全部为空时返回最后的候选。
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // renderWorkerGraphOverview folds the global situational snapshot into the worker's
@@ -330,6 +381,12 @@ func renderWorkerGraphOverview(data map[string]any) string {
 	// coverage 是给规划者判断「哪类测得少 / 要不要扩范围」的信号，与 worker「只做领到的
 	// 那条意图、别追未覆盖的点」的职责边界相悖 → 从 worker 视图里剔除。data 是本次 worker
 	// 专属的新 map，删键不影响 planner。
+	// 类型分布（finding_type_counts）与 coverage 同理：是规划者「往哪个方向再平衡」的
+	// 决策信号，worker 只做领到的意图、只从提示纪律感知触顶规则文字 → 一并剔除。
+	// type_coverage（按目录的覆盖空白表）同样只服务规划排期，worker 看到只会想「顺手探
+	// 别的类」，越出「只做这一条意图」的边界 → 一并剔除。
+	delete(data, "finding_type_counts")
+	delete(data, "type_coverage")
 	delete(data, "coverage")
 	b, err := json.Marshal(data)
 	if err != nil {

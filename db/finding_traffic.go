@@ -375,9 +375,10 @@ type RecordFindingInput struct {
 	// 交付物正文（报告分节）。与 Summary 分离：Summary 是工作摘要，
 	// 可能带过程叙述；这些字段按报告文体书写。
 	Description, Impact, Remediation, Session string
-	// Quarantine: true = 命中 SRC 黑名单且无升级证据 → 入库 status='quarantined'
-	// (隔离区,不进交付报告)。由 agent 层的硬闸判定(SrcFindingBlocked)填入;
-	// db 层不重复判定,保持单一职责。
+	// Quarantine: 历史语义——旧版词表闸（agent 层 SrcFindingBlocked）命中的隔离
+	// 上报标记，true 时入库 status='quarantined'（隔离区,不进交付报告）。新代码
+	// 已改用类型目录（collect:false 直接拒收）不再产生 quarantined，此字段仅为
+	// 保留存量查询/展示与人工放行路径；db 层不重复判定,保持单一职责。
 	Quarantine bool
 }
 

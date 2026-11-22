@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -253,6 +254,53 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 		t.Fatalf("archive token summary missing: %#v", stats)
 	}
 	assertArchiveGlobalStats(t, d, profileName, skillName, toolName, vulnclass)
+
+	// 旧档兼容:本票之前生成的归档 finding_stats 没有 vulnclass_counts 键。
+	// 剥掉该键模拟旧档,重跑 FindingStats 必须不报错、totals/vulnclasses 照常
+	// 合并、类型分布只是缺该类(additive,不回归)。
+	var manifest map[string]json.RawMessage
+	if err := json.Unmarshal(ready.AggregateStats, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	var findingStats map[string]json.RawMessage
+	if err := json.Unmarshal(manifest["finding_stats"], &findingStats); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := findingStats["vulnclass_counts"]; !ok {
+		t.Fatalf("new archive manifest missing vulnclass_counts: %s", manifest["finding_stats"])
+	}
+	delete(findingStats, "vulnclass_counts")
+	strippedStats, err := json.Marshal(findingStats)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest["finding_stats"] = strippedStats
+	strippedManifest, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`UPDATE task_archives SET aggregate_stats=$2 WHERE id=$1`, archive.ID, string(strippedManifest)); err != nil {
+		t.Fatal(err)
+	}
+	oldStats, err := d.FindingStats()
+	if err != nil {
+		t.Fatalf("FindingStats with legacy archive manifest: %v", err)
+	}
+	if oldStats.Critical < 1 {
+		t.Fatalf("legacy archive totals not merged: %+v", oldStats)
+	}
+	if !slices.Contains(oldStats.VulnClasses, vulnclass) {
+		t.Fatalf("legacy archive vulnclasses missing %q", vulnclass)
+	}
+	for _, row := range oldStats.VulnClassCounts {
+		if row.VulnClass == vulnclass {
+			t.Fatalf("legacy archive must not contribute vulnclass_counts for %q: %+v", vulnclass, row)
+		}
+	}
+	// 还原 manifest,后续 restore 流程不受影响。
+	if _, err := d.Exec(`UPDATE task_archives SET aggregate_stats=$2 WHERE id=$1`, archive.ID, string(ready.AggregateStats)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := d.Exec(`DELETE FROM companies WHERE id=$1`, companyID); err != nil {
 		t.Fatal(err)
 	}
@@ -464,5 +512,18 @@ func assertArchiveGlobalStats(t *testing.T, d *DB, profileName, skillName, toolN
 	}
 	if !foundClass {
 		t.Fatalf("archive finding class %q missing", vulnclass)
+	}
+	// 类型分布:归档 finding(默认 pending)按原始写法并入 vulnclass_counts。
+	foundCount := false
+	for _, row := range findings.VulnClassCounts {
+		if row.VulnClass == vulnclass {
+			foundCount = true
+			if row.Count != 1 || row.Confirmed != 0 {
+				t.Fatalf("archive vulnclass_counts %q = %+v, want count=1 confirmed=0", vulnclass, row)
+			}
+		}
+	}
+	if !foundCount {
+		t.Fatalf("archive vulnclass_counts %q missing: %+v", vulnclass, findings.VulnClassCounts)
 	}
 }

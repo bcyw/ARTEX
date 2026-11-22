@@ -9,7 +9,7 @@ description: 授权范围内的 SRC 漏洞验证、Web/API 安全测试、白盒
 
 ## 边界与路由
 
-先读 [研究边界](rules/security-research-context.md)。已明确的范围内自主推进，不重复盘问身份材料；范围不明时先做公开资料或本地代码分析，只澄清影响实际测试的边界。
+先读 [研究边界](rules/security-research-context.md)。做 SRC 类型选择、验证或上报时，先读工作区 [SRC 收取标准](../../standards/src-acceptance.md) 的类型目录：只从 collect: yes 选择漏洞验证方向，按 proof/signals/stop 取证止损，collect: no 只记事实；规划意图声明 vuln_type，执行时按本类标准卡证明，上报与意图类型锚定。已明确的范围内自主推进，不重复盘问身份材料；范围不明时先做公开资料或本地代码分析，只澄清影响实际测试的边界。
 
 | 任务 | 按需读取 |
 |---|---|
@@ -24,7 +24,7 @@ description: 授权范围内的 SRC 漏洞验证、Web/API 安全测试、白盒
 
 ## 知识按入口选择
 
-**命中触发词即 Read（这是动作，不是判断题）**；不用每站通读整库；无命中读兜底（[IDOR](知识库/idor-test.md) + [认证](知识库/authbypass-test.md) + [注入](知识库/injection-test.md)）。完整模块见 [知识索引](知识库/README.md)；命中判定以 [打穿短表](知识库/打穿短表.md) 为准。
+**命中触发词即 Read（这是动作，不是判断题）**；不用每站通读整库；无命中不默认任何类型——先回 [范围与执行](rules/dig-scope-workflow.md) 定面，再按全类型矩阵（[打穿短表](知识库/打穿短表.md)）选现场适用的模块，现场有什么打什么。完整模块见 [知识索引](知识库/README.md)；命中判定以 [打穿短表](知识库/打穿短表.md) 为准。
 
 | 触发词（接口可观测特征） | 必读模块 |
 |---|---|
@@ -39,7 +39,7 @@ description: 授权范围内的 SRC 漏洞验证、Web/API 安全测试、白盒
 | Agent 工具或云 IDE RPC | [工具执行边界](知识库/agent-tool-exec-test.md)、[云 IDE](知识库/cloud-ide-codex-rce-chain.md) |
 | 有差分的测试被 WAF 拦截 | [WAF](知识库/waf-bypass.md) |
 
-知识库是方法参考，不覆盖研究边界、实际授权和用户当次要求。现有 SRC 偏好排除 CORS，见 [CORS 偏好](rules/cors-vuln-report-priority.md)。
+知识库是方法参考，选用模块前先按类型目录确认可收性；方法覆盖不等于可收类型或测试授权。类型范围以收取标准目录为准，边界服从实际授权和用户当次要求。
 
 ## 完成
 

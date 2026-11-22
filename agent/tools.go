@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -411,7 +413,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	const openIntentsCap = 30
 	fr, _ := t.ts.Frontier(openIntentsCap) // priority DESC, id ASC —— 优先级最高的前 N 条；真实总数见 frontier_open
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
-	all, _ := t.ts.ListByKind(db.KindIntent, 300)
+	// Coverage counters need every intent, including older nodes outside the
+	// frontier/recent-done display windows. Reuse this query without a row cap.
+	all, _ := t.ts.ListByKind(db.KindIntent, math.MaxInt)
 	var running, recentDone []*db.Node
 	for _, n := range all {
 		switch n.State {
@@ -445,6 +449,33 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
 	out["findings_total"] = len(vulnNodes)             // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
 	out["facts"] = len(factNodes)                      // 探索事实/结论数（含否定结论）
+	// finding_type_counts：类型分布反馈（spec：挖掘方向再平衡 L2 软回路）。本任务已产出
+	// finding 按折叠后规范桶名计数，与上限值（cap）同段呈现——规划者据此自主发现「某类
+	// 5、某类 0」式失衡并向词表优先序里未触顶的方向倾斜（软性观测，不设硬指标）。桶内
+	// 计数与 cap 的对比即「还能报几个」；full 标出已触顶的桶。
+	// 口径与同类上限闸一致：排除 quarantined/false_positive/duplicate/ignored（探索节点
+	// state 恒 confirmed，状态真相在 findings 表 → 交叉既有 FindingMetaByNodeID，零新增
+	// SQL）。分布只进规划者态势：worker 渲染路径剔除本键（renderWorkerGraphOverview）。
+	// 桶计数只折叠一次，finding_type_counts 与 type_coverage 共用同一份结果，保证两处
+	// findings 数字永不漂移。
+	typeBuckets := findingTypeBuckets(t, vulnNodes)
+	out["finding_type_counts"] = findingTypeCountsFrom(typeBuckets)
+	// type_coverage：按类型目录书写序给出「每类方向的覆盖状态」，让规划按目录补空白，
+	// 而不是凭感觉发散（spec D5）。每行：
+	//   findings   本任务该规范桶的有效 finding 数——与 finding_type_counts 同一折叠桶、
+	//              同一状态排除口径（quarantined/false_positive/duplicate/ignored 不计；
+	//              无 findings 行的节点按节点态计）。
+	//   full       findings >= 目录 cap（该方向同类上限已满）。
+	//   intents_*  本任务 payload 带 vuln_type 的意图节点按 state 计数：open→open、
+	//              running→running、终态（done/blocked/exhausted/stopped）→done；
+	//              paused/deleted/未知态不计（暂停不可领取、删除等于不存在——宁可少计，
+	//              也不让已撤销方向假装排过队）。意图按目录 fold 归桶；目录外写法自成
+	//              一桶但不进本表（覆盖表只服务「按目录规划」）。
+	// 零新增 SQL：finding 与意图节点都是本函数上方已预取的列表；意图预取不截断，
+	// 明细窗口不影响覆盖计数。意图列表取不到时该行 intents_* 全为 0、不报错。与 finding_type_counts
+	// 同理仅规划者可见（worker 渲染路径剔除）。
+	out["type_coverage"] = typeCoverageRows(srcCatalog(), typeBuckets, all)
+
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
 	// 让 planner 每轮判目标时一眼看到最近确认的漏洞；全量/更早的用 list_findings 取。
 	// 每条只留 {id, summary, from_intent?}：from_intent 是产生本漏洞的意图。
@@ -573,6 +604,151 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		}
 	}
 	return out
+}
+
+// findingStatusExcluded reports whether a findings-row status takes the finding
+// out of the effective-output 口径 — the per-type cap gate and the planner's
+// type distribution share it, so only real, non-redundant output counts.
+func findingStatusExcluded(status string) bool {
+	switch status {
+	case db.FindingQuarantined, db.FindingFalsePositive, db.FindingDuplicate, db.FindingIgnored, "dismissed":
+		return true
+	}
+	return false
+}
+
+// findingStatusMeta 取本任务 finding 节点在独立 findings 表的状态真相
+// （nodeID → status）。AssetStore 缺席、taskID 未设或查询失败时返回 nil：
+// 调用方回退到节点态（confirmed 计入、dismissed 排除），语义为
+// findingTypeCounts / srcClassCapReached 共享。
+func (t *ToolSet) findingStatusMeta() map[int64]db.FindingMeta {
+	if t.as == nil || t.taskID <= 0 {
+		return nil
+	}
+	meta, err := t.as.FindingMetaByNodeID(t.taskID)
+	if err != nil {
+		return nil
+	}
+	return meta
+}
+
+// findingTypeBuckets folds the already-fetched finding nodes into canonical
+// buckets: canonical bucket name → effective finding count. Buckets come from
+// the hot-loaded hunting-focus fold table (canonical names + alias folding, no
+// type vocabulary in code — ADR-0004). Nodes whose standalone findings row is
+// quarantined/false_positive/duplicate/ignored are excluded (same effective 口径
+// as the per-type cap gate); a node without a findings row for this task uses
+// its node-level state (confirmed counts, dismissed does not). Shared by
+// finding_type_counts and type_coverage so the two never disagree.
+func findingTypeBuckets(t *ToolSet, vulnNodes []*db.Node) map[string]int {
+	focus := srcHunting()
+	counts := map[string]int{}
+	meta := t.findingStatusMeta()
+	for _, n := range vulnNodes {
+		var fp map[string]any
+		_ = json.Unmarshal(n.Payload, &fp)
+		vc, _ := fp["vulnclass"].(string)
+		if strings.TrimSpace(vc) == "" {
+			continue // 无类型的 finding 无法入桶；findings_total 已计它
+		}
+		status := n.State
+		if m, ok := meta[n.ID]; ok {
+			status = m.Status
+		}
+		if findingStatusExcluded(status) {
+			continue
+		}
+		counts[focus.fold(vc)]++
+	}
+	return counts
+}
+
+// findingTypeCountsFrom renders a bucket→count map as the distribution block.
+// Rows render in the hunting block's written (priority) order, then remaining
+// unknown buckets alphabetically, so the planner reads the same ordering it gets
+// in the hunting guidance.
+func findingTypeCountsFrom(counts map[string]int) map[string]any {
+	focus := srcHunting()
+	rows := make([]map[string]any, 0, len(counts))
+	seen := make(map[string]bool, len(counts))
+	for _, bucket := range focus.Types { // 词表书写序 = 优先级序 = 稳定渲染槽位
+		if counts[bucket] > 0 {
+			rows = append(rows, findingTypeCountRow(bucket, counts[bucket], focus.Cap))
+			seen[bucket] = true
+		}
+	}
+	rest := make([]string, 0, len(counts))
+	for bucket := range counts { // 表未覆盖的新类型自成桶，照常计数
+		if !seen[bucket] {
+			rest = append(rest, bucket)
+		}
+	}
+	sort.Strings(rest)
+	for _, bucket := range rest {
+		rows = append(rows, findingTypeCountRow(bucket, counts[bucket], focus.Cap))
+	}
+	return map[string]any{"cap": focus.Cap, "counts": rows}
+}
+
+// findingTypeCountRow renders one bucket; full marks a bucket that has reached
+// the per-type cap so the planner sees at a glance which directions are closed.
+func findingTypeCountRow(bucket string, count, cap int) map[string]any {
+	return map[string]any{"type": bucket, "count": count, "full": count >= cap}
+}
+
+// typeCoverageRows renders the type_coverage table: one row per catalog entry,
+// in catalog written order (collectable types first, explicitly-not-collected
+// ones after — the same ordering the hunting guidance uses), so the planner can
+// pick directions by reading down the list and spotting empty rows.
+//
+// findings reuses the finding_type_counts bucket counts; full marks a bucket at
+// the catalog's per-type cap. intents_* count this task's intent nodes that
+// carry a vuln_type payload key, folded to canonical names, grouped by node
+// state: open → intents_open, running → intents_running, terminal states
+// (done/blocked/exhausted/stopped) → intents_done. paused/deleted/unknown states
+// are not counted — a paused intent is not claimable and a deleted one should not
+// make a direction look already-queued; under-counting is the safe direction for
+// a coverage signal. Buckets outside the catalog (new spellings) are folded but
+// deliberately omitted from the table: type_coverage only serves "plan by the
+// catalog". A nil intent list degrades to all-zero intent columns, never an error
+// (zero extra SQL — callers pass lists they already fetched).
+func typeCoverageRows(catalog srcTypeCatalog, findingCounts map[string]int, intents []*db.Node) []map[string]any {
+	intentsOpen := map[string]int{}
+	intentsRunning := map[string]int{}
+	intentsDone := map[string]int{}
+	for _, n := range intents {
+		var p map[string]any
+		if err := json.Unmarshal(n.Payload, &p); err != nil {
+			continue // 坏 payload 不计，不影响覆盖表其余行
+		}
+		vt, _ := p["vuln_type"].(string)
+		if strings.TrimSpace(vt) == "" {
+			continue // 无类型的意图无法归入目录方向
+		}
+		bucket := catalog.fold(vt)
+		switch n.State {
+		case "open":
+			intentsOpen[bucket]++
+		case "running":
+			intentsRunning[bucket]++
+		case "done", "blocked", "exhausted", "stopped":
+			intentsDone[bucket]++
+		}
+	}
+	rows := make([]map[string]any, 0, len(catalog.Entries))
+	for _, e := range catalog.Entries { // 目录书写序 = 优先级序
+		findings := findingCounts[e.Name]
+		rows = append(rows, map[string]any{
+			"type":            e.Name,
+			"collect":         e.Collect,
+			"findings":        findings,
+			"full":            findings >= catalog.Cap,
+			"intents_open":    intentsOpen[e.Name],
+			"intents_running": intentsRunning[e.Name],
+			"intents_done":    intentsDone[e.Name],
+		})
+	}
+	return rows
 }
 
 func inheritedMap(m map[string]any, sourceTaskID int64) map[string]any {
@@ -1042,11 +1218,28 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 // --- planner write tools ---
 
 // intentItem 是 add_intent 批量/单条的一条探索方向。
+// VulnType 是目标漏洞类型（目录规范名或别名，空 = 纯侦察意图）；Proof 是本方向
+// 的最小证明物（可选，空则取目录里该类型的 proof）。批量元素与单条同规则。
 type intentItem struct {
 	Summary   string            `json:"summary"`
+	VulnType  string            `json:"vuln_type"`
+	Proof     string            `json:"proof"`
 	AssetIDs  []json.RawMessage `json:"asset_ids"`
 	ParentIDs []json.RawMessage `json:"parent_ids"`
 	Priority  int               `json:"priority"`
+}
+
+// collectableNames 列出目录内 collect: true 的规范名，保持目录书写序。
+// 规划期拒建文案里的「当前可收类型」全部从这里现读，Go 侧零类型词表常量
+// （ADR-0004：类型目录只住在热载标准文件的 ~~~types 块里）。
+func collectableNames(c srcTypeCatalog) []string {
+	names := make([]string, 0, len(c.Entries))
+	for _, e := range c.Entries {
+		if e.Collect {
+			names = append(names, e.Name)
+		}
+	}
+	return names
 }
 
 // addOneIntent 创建一条意图节点并连上游血缘，返回 id。
@@ -1068,12 +1261,35 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 			return 0, fmt.Errorf("parent_id %d 是 %q 节点，不能作为意图锚点：意图只能锚在已确认的【事实(fact)/发现(finding)】上，不能挂在意图/目标/提示上；顶层全新方向请留空 parent_ids", pidv, n.Kind)
 		}
 	}
+	// 规划期目录校验（票 02，spec D3/D4）：类型非空时必须能在热载目录里
+	// resolve 且 collect:true；明确不收与目录外自造类型在建节点前拒建。
+	// 空类型 = 纯侦察意图，放行且 payload 不写类型键。校验通过后落目录规范名
+	// （别名写法折叠，不存别名原文）与证明物（调用方给的优先，缺省取目录值）。
+	payload := map[string]any{"summary": it.Summary}
+	if vulnType := strings.TrimSpace(it.VulnType); vulnType != "" {
+		catalog := srcCatalog()
+		entry, ok := catalog.lookup(vulnType)
+		if !ok {
+			return 0, fmt.Errorf("意图类型「%s」不在标准类型目录内：规划期只能选目录里 collect: yes 的可收类型。当前可收类型（按目录序）：%s。新类型请先用 record_fact 记录观察，由维护者热改 standards/src-acceptance.md 的 ~~~types 目录后再用；纯侦察方向请省略 vuln_type", vulnType, strings.Join(collectableNames(catalog), "、"))
+		}
+		if !entry.Collect {
+			stop := entry.Stop
+			if stop == "" {
+				stop = "该类型明确不在收取范围"
+			}
+			return 0, fmt.Errorf("意图类型「%s」按 SRC 收取标准明确不收：%s。不要为它建意图——请改用 record_fact 记录本次观察，或从当前可收类型里另选方向：%s", entry.Name, stop, strings.Join(collectableNames(catalog), "、"))
+		}
+		payload["vuln_type"] = entry.Name
+		payload["proof"] = entry.Proof
+		if proof := strings.TrimSpace(it.Proof); proof != "" {
+			payload["proof"] = proof
+		}
+	}
 	priority := it.Priority
 	if priority == 0 {
 		priority = 5
 	}
 	anchors := pidList(it.AssetIDs)
-	payload := map[string]any{"summary": it.Summary}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
@@ -1098,11 +1314,13 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 }
 
 func (t *ToolSet) addIntent() actool.CoreTool {
-	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
+	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图必须从 SRC 类型目录（standards/src-acceptance.md 的 ~~~types 节）选定目标类型 vuln_type，并声明本方向要拿到的证明物 proof；类型与证明物随意图落库，worker 按它执行、上报的漏洞类型也由它锚定。目录内 collect: no（标准明确不收）或目录外自造类型会在规划期被拒建；纯侦察方向可省略 vuln_type。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
-			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
+			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/vuln_type/proof/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。类型用 vuln_type 结构化声明，不要只在 summary 里写类型。"),
+			"vuln_type":  str("本方向的目标漏洞类型：取 SRC 标准类型目录里 collect: yes 的规范名或别名（目录 = standards/src-acceptance.md 的 ~~~types 节；工具报错时会列出当前可收类型）。标准明确不收（collect: no）与目录外自造类型会被拒建。纯侦察/信息收集方向留空 = 不带类型。"),
+			"proof":      str("本类型的最小证明物（可选）：本方向拿到什么才算数。缺省用目录里该类型的 proof 文案；有更贴合本方向的证明物可覆盖。只在该方向带 vuln_type 时生效。"),
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
 			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
 			"priority":   intp("优先级 0-10，默认5"),
@@ -1110,7 +1328,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Intents    []intentItem `json:"intents"`
-				intentItem              // 单条模式：顶层 summary/asset_ids/parent_ids/priority
+				intentItem              // 单条模式：顶层 summary/vuln_type/proof/asset_ids/parent_ids/priority
 			}
 			_ = json.Unmarshal(in, &a)
 			batch := len(a.Intents) > 0
@@ -1239,7 +1457,7 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 
 func (t *ToolSet) addFinding() actool.CoreTool {
 	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。description / impact / remediation 按交付报告文体填写：直接描述功能与根因、已验证的影响、可执行的修复，不写工具名、检索过程或“未绑定流量”之类的过程说明。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
-		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要（工作记录，不是报告正文）"),
+		"vulnclass": str("可选：漏洞类别；省略时取当前意图的 vuln_type，填写时须与意图类型一致"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要（工作记录，不是报告正文）"),
 		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
 		"evidence":         str("证据/PoC 文本：精选最能证明漏洞的关键片段（≤20 行），完整请求/响应报文应通过 traffic_refs 绑定流量记录，不在 evidence 里整段倾倒"),
 		"description":      str("漏洞描述（交付文体）：功能如何工作、根因、攻击者能做什么；写已验证事实，不写过程旁白；全文 ≤200 字"),
@@ -1249,7 +1467,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
 			"items": obj(map[string]any{"traffic_id": str("traffic_search 返回的真实流量 ID"), "role": map[string]any{"type": "string", "enum": []string{"baseline", "proof", "verification", "supporting"}}, "note": str("该流量如何支持漏洞结论")}, "traffic_id")},
-	}, "vulnclass", "severity", "summary", "description", "impact", "remediation"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+	}, "severity", "summary", "description", "impact", "remediation"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 		var a struct {
 			VulnClass, Name, Severity, Summary, Evidence string
 			Description, Impact, Remediation, Session    string
@@ -1270,28 +1488,64 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if !db.ValidSeverity(a.Severity) {
 			return actool.Errorf("severity 必须为 critical / high / medium / low 之一（按 SRC 定级纪律选择：拿不准降级不升级）"), nil
 		}
-		// SRC 黑名单硬闸：命中且无升级证据 → 入库进隔离区（status=quarantined），
-		// 不删除（保留排查误杀的余地）、不进交付报告（报告只取 confirmed）。
-		// input 先完整构造（与正常路径同一份，含 IntentID/AssetIDs——隔离 finding
-		// 也要保留意图与资产关联，人工放行后信息完整），blocked 只改 Quarantine 标记。
-		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs),
-			Description: a.Description, Impact: a.Impact, Remediation: a.Remediation, Session: a.Session}
-		if blocked, reason := SrcFindingBlocked(SrcFindingTexts{VulnClass: a.VulnClass, Name: a.Name, Summary: a.Summary, Evidence: a.Evidence, Description: a.Description}); blocked {
-			input.Quarantine = true
-			q, err := t.ts.RecordFinding(ctx, input)
-			if err != nil {
-				return actool.Errorf(err.Error()), nil
+		// 类型归属校验（票 01，取代旧版 SRC 黑名单硬闸）：目录（~~~types）是
+		// 类型归属唯一机器来源。规则①意图锚定：worker 当前意图（ownerNode，
+		// 意图节点）的类型是硬锚——省略 intent_id 时沿用其类型，显式填写须与它
+		// 同桶，改指其他意图也不能绕过；无当前意图时按传入 intent_id 兜底。
+		// 规则②范围规则：collect:false 明确拒收并引用其 stop 文案；规则③目录外
+		// 未知类型放行（词表不堵死新类型）。校验通过后落库统一用规范名。
+		catalog := srcCatalog()
+		vulnClass := a.VulnClass
+		intentType, intentProof := "", ""
+		resolveIntentType := func(id int64) {
+			if intentType != "" {
+				return
 			}
-			t.writes.Findings++
-			raw, _ := json.Marshal(map[string]any{
-				"finding_id":        strconv.FormatInt(q.FindingID, 10),
-				"finding_node_id":   strconv.FormatInt(q.NodeID, 10),
-				"evidence_status":   "quarantined",
-				"quarantine_reason": reason,
-				"note":              "命中 SRC 收取黑名单（" + reason + "）。指纹/端口/版本披露、点击劫持属一票否决，无论证据一律不收；其余黑名单类型如确有升级条件对应的真实危害证据，在 summary 中写明「升级证据：…」并附实际响应证据后重新上报；否则请改用 record_fact 记 inferred 事实。",
-			})
-			return actool.Text(fmt.Sprintf("finding quarantined: %d\n%s", q.NodeID, raw)), nil
+			if node, err := t.ts.GetNodeWithSources(id); err == nil && node != nil && node.Kind == db.KindIntent {
+				var ip map[string]any
+				if json.Unmarshal(node.Payload, &ip) == nil {
+					if v, _ := ip["vuln_type"].(string); v != "" {
+						intentType = v
+						intentProof, _ = ip["proof"].(string)
+					}
+				}
+			}
 		}
+		if t.ownerNode > 0 {
+			resolveIntentType(t.ownerNode)
+		}
+		if intentType == "" {
+			if iid := pid(a.IntentID); iid > 0 {
+				resolveIntentType(iid)
+			}
+		}
+		if intentType != "" {
+			if vulnClass == "" {
+				vulnClass = intentType
+			} else if catalog.fold(vulnClass) != catalog.fold(intentType) {
+				if intentProof == "" {
+					if e, ok := catalog.lookup(intentType); ok {
+						intentProof = e.Proof
+					}
+				}
+				return actool.Errorf(fmt.Sprintf("类型归属不符：本次意图的类型是「%s」（拿什么算数：%s），上报的 vulnclass 是「%s」。请补强已有 finding（同根因不另立报）或 record_fact 记录观察，不要改报类型", intentType, intentProof, a.VulnClass)), nil
+			}
+		}
+		if entry, ok := catalog.lookup(vulnClass); ok && !entry.Collect {
+			return actool.Errorf(fmt.Sprintf("该类型「%s」不在 SRC 收取范围：%s。请改用 record_fact 记录观察，或改报目录内 collect: yes 的可收类型", entry.Name, entry.Stop)), nil
+		}
+		if entry, ok := catalog.lookup(vulnClass); ok {
+			vulnClass = entry.Name
+		}
+		// 同类上限闸：单任务内单一漏洞类型的有效产出（pending+confirmed）触顶即
+		// 拒收并引导转向；上限值与折叠词表均在热载标准文件维护（见 finding_cap.go
+		// 与 srchunting.go），代码不含类型词表常量（ADR-0004）。归属校验通过的类型
+		// 才参与计数，两个闸互不干扰。
+		if n, limit, reached := t.srcClassCapReached(vulnClass); reached {
+			return actool.Errorf(fmt.Sprintf("同类上限触顶：本任务该类型（%s）有效产出已达 %d/%d，不再接收新 finding。请补强已有 finding（追加证据与影响面，同根因不另立新报），或改用 record_fact 记录本次观察，并把探索方向转向其他未触顶类型", vulnClass, n, limit)), nil
+		}
+		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: vulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs),
+			Description: a.Description, Impact: a.Impact, Remediation: a.Remediation, Session: a.Session}
 		// Auto-binding off: ignore the evidence params instead of rejecting the call.
 		// stripTrafficParameters already removes them from the advertised schema, but
 		// models routinely emit fields anyway — failing here would discard a confirmed

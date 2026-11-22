@@ -2032,13 +2032,14 @@ func (s *Server) resolveAssetIDs(ids []int64) map[int64]*db.Asset {
 }
 
 // findingStats serves the whole-table aggregates (stat cards + vuln-class filter)
-// for the paginated 发现 page.
+// for the paginated 发现 page. 类型分布在呈现层按规范桶折叠(见 foldFindingVulnClassStats)。
 func (s *Server) findingStats(w http.ResponseWriter, r *http.Request) {
 	st, err := s.m.pg.FindingStats()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	foldFindingVulnClassStats(st)
 	writeJSON(w, 200, st)
 }
 

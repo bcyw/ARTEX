@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 )
 
@@ -49,6 +52,57 @@ func (s *Server) findingAssetTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, tree)
+}
+
+// foldFindingVulnClassStats 把 stats 的类型分布在呈现层按规范桶合并(票 05):
+// sql_injection / SQL 注入 / SQLi 各自的计数行折叠为「注入类」一行,别名不再
+// 碎片化下拉。逐行 VulnClass 经挖掘方向节的折叠表(agent.SrcFoldVulnClass,
+// 未覆盖写法以归一形自成一桶)映射到桶名,计数与已确认数沿桶累加,Values 回填
+// 桶内原始写法清单供前端把桶选项展开成列表筛选(db 的多值 IN)。
+//
+// 词表只住热载标准文件(ADR-0004):本函数只调折叠入口,不内置任何类型名;
+// db 层保持原始计数可查,FindingStats 结构不在此改动。
+func foldFindingVulnClassStats(st *db.FindingStats) {
+	if len(st.VulnClassCounts) == 0 {
+		return
+	}
+	type bucket struct {
+		count, confirmed int
+		values           []string
+	}
+	buckets := make(map[string]*bucket, len(st.VulnClassCounts))
+	order := make([]string, 0, len(st.VulnClassCounts))
+	for _, row := range st.VulnClassCounts {
+		name := agent.SrcFoldVulnClass(row.VulnClass)
+		if name == "" {
+			continue // 归一后为空的写法不构成桶(与 db 层 vulnclass <> '' 同口径)
+		}
+		b, ok := buckets[name]
+		if !ok {
+			b = &bucket{}
+			buckets[name] = b
+			order = append(order, name)
+		}
+		b.count += row.Count
+		b.confirmed += row.Confirmed
+		if row.VulnClass != "" && !slices.Contains(b.values, row.VulnClass) {
+			b.values = append(b.values, row.VulnClass)
+		}
+	}
+	folded := make([]db.FindingVulnClassCount, 0, len(order))
+	for _, name := range order {
+		b := buckets[name]
+		folded = append(folded, db.FindingVulnClassCount{
+			VulnClass: name, Count: b.count, Confirmed: b.confirmed, Values: b.values,
+		})
+	}
+	sort.Slice(folded, func(i, j int) bool {
+		if folded[i].Count != folded[j].Count {
+			return folded[i].Count > folded[j].Count
+		}
+		return folded[i].VulnClass < folded[j].VulnClass
+	})
+	st.VulnClassCounts = folded
 }
 
 // findingGroups serves the task-group page used by the global findings view.
