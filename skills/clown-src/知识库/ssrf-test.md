@@ -4,6 +4,8 @@
 
 # SSRF 测试手册
 
+路线选择、组件/通用机制研究、OOB 与有界停止见 [技术路线研究](../rules/technical-route-research.md)。
+
 ## 常见注入点
 
 ```
@@ -26,7 +28,7 @@ DNSLOG="your-unique-id.dnslog.cn"
 curl "https://target.com/api/preview?url=http://$DNSLOG/test"
 
 # 去 dnslog 平台查看是否有 DNS 查询记录
-# 有记录 → SSRF 存在
+# 有记录 → 仅确认与本次探针关联的带外交互事实；继续按收取标准证明内部响应与实际危害，不能直接认定完整 SSRF。
 ```
 
 ### 内网探测（确认 SSRF 后）

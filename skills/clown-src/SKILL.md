@@ -15,6 +15,7 @@ description: 授权范围内的 SRC 漏洞验证、Web/API 安全测试、白盒
 |---|---|
 | 黑盒 Web/API、集团 SRC | [范围与执行](rules/dig-scope-workflow.md)，需要类型选择时读 [价值与矩阵](rules/src-value-hunting.md) |
 | 项目源码、框架安全审计 | [白盒流程](rules/researcher-blackbox-whitebox.md) |
+| 通用 0day、组件利用链、OOB 与路线续探 | [技术路线研究](rules/technical-route-research.md) |
 | 已有漏洞证据，需要正式报告 | [报告格式](rules/vuln-report-format.md) |
 | 需要创建任务产物或清理指定任务 | [目录与清理](rules/desktop-task-folder.md) |
 | 用户要求沉淀可复用研究经验 | [知识维护](rules/hunt-iter.md) |
@@ -28,7 +29,7 @@ description: 授权范围内的 SRC 漏洞验证、Web/API 安全测试、白盒
 
 | 触发词（接口可观测特征） | 必读模块 |
 |---|---|
-| 用户、租户、对象访问 | [IDOR](知识库/idor-test.md)、[认证](知识库/authbypass-test.md) |
+| 用户、租户、对象访问，已有高危害或技术链线索 | [IDOR](知识库/idor-test.md)、[认证](知识库/authbypass-test.md)；不主动规划仅证明普通访问差异的验证意图 |
 | 查询、筛选、表达式 | [注入](知识库/injection-test.md) |
 | URL 抓取、代理、预览 | [SSRF](知识库/ssrf-test.md) |
 | 回显、富文本、可写内容 | [XSS](知识库/xss-test.md) |

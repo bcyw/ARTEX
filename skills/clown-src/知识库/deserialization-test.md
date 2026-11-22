@@ -1,5 +1,7 @@
 # deserialization
 
+路线选择、组件/通用机制研究、OOB 与有界停止见 [技术路线研究](../rules/technical-route-research.md)。
+
 # Insecure Deserialization
 
 

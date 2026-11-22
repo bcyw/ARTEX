@@ -494,8 +494,15 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		routeRows = append(routeRows, routeStateSummary(st))
 	}
 	sort.Slice(routeRows, func(i, j int) bool {
-		return routeRows[i]["id"].(string) < routeRows[j]["id"].(string)
+		if routeRows[i]["stopped"] != routeRows[j]["stopped"] {
+			return !routeRows[i]["stopped"].(bool)
+		}
+		return routeRows[i]["latest_node_id"].(int64) > routeRows[j]["latest_node_id"].(int64)
 	})
+	out["routes_total"] = len(routeRows)
+	if len(routeRows) > 20 {
+		routeRows = routeRows[:20]
+	}
 	out["routes"] = routeRows
 
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
@@ -1246,14 +1253,15 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 // VulnType 是目标漏洞类型（目录规范名或别名，空 = 纯侦察意图）；Proof 是本方向
 // 的最小证明物（可选，空则取目录里该类型的 proof）。批量元素与单条同规则。
 type intentItem struct {
-	Summary   string            `json:"summary"`
-	VulnType  string            `json:"vuln_type"`
-	Proof     string            `json:"proof"`
-	AssetIDs  []json.RawMessage `json:"asset_ids"`
-	ParentIDs []json.RawMessage `json:"parent_ids"`
-	Priority  int               `json:"priority"`
-	Route     *Route            `json:"route,omitempty"`
-	RouteCap  int               `json:"route_cap,omitempty"`
+	Summary        string            `json:"summary"`
+	VulnType       string            `json:"vuln_type"`
+	Proof          string            `json:"proof"`
+	AssetIDs       []json.RawMessage `json:"asset_ids"`
+	ParentIDs      []json.RawMessage `json:"parent_ids"`
+	Priority       *int              `json:"priority"`
+	PriorityReason string            `json:"priority_reason,omitempty"`
+	Route          *Route            `json:"route,omitempty"`
+	RouteCap       int               `json:"route_cap,omitempty"`
 }
 
 // collectableNames 列出目录内 collect: true 的规范名，保持目录书写序。
@@ -1314,9 +1322,12 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 			payload["proof"] = proof
 		}
 	}
-	priority := it.Priority
-	if priority == 0 {
-		priority = 5
+	priority, err := t.routePriority(it)
+	if err != nil {
+		return 0, err
+	}
+	if reason := strings.TrimSpace(it.PriorityReason); reason != "" {
+		payload["priority_reason"] = reason
 	}
 	anchors := pidList(it.AssetIDs)
 	if len(anchors) > 0 {
@@ -1361,15 +1372,16 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图必须从 SRC 类型目录（standards/src-acceptance.md 的 ~~~types 节）选定目标类型 vuln_type，并声明本方向要拿到的证明物 proof；类型与证明物随意图落库，worker 按它执行、上报的漏洞类型也由它锚定。目录内 collect: no（标准明确不收）或目录外自造类型会在规划期被拒建；纯侦察方向可省略 vuln_type。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
-			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/vuln_type/proof/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。类型用 vuln_type 结构化声明，不要只在 summary 里写类型。"),
-			"vuln_type":  str("本方向的目标漏洞类型：取 SRC 标准类型目录里 collect: yes 的规范名或别名（目录 = standards/src-acceptance.md 的 ~~~types 节；工具报错时会列出当前可收类型）。标准明确不收（collect: no）与目录外自造类型会被拒建。纯侦察/信息收集方向留空 = 不带类型。"),
-			"proof":      str("本类型的最小证明物（可选）：本方向拿到什么才算数。缺省用目录里该类型的 proof 文案；有更贴合本方向的证明物可覆盖。只在该方向带 vuln_type 时生效。"),
-			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
-			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
-			"priority":   intp("优先级 0-10，默认5"),
-			"route":      routeSchema(),
-			"route_cap":  intp("可选：覆盖该路线默认 6 次执行意图上限；仅在路线有明确运营理由时设置，设置后持久生效"),
+			"intents":         map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/vuln_type/proof/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"summary":         str("[单条] 一句话描述这个探索方向：做什么+为什么。类型用 vuln_type 结构化声明，不要只在 summary 里写类型。"),
+			"vuln_type":       str("本方向的目标漏洞类型：取 SRC 标准类型目录里 collect: yes 的规范名或别名（目录 = standards/src-acceptance.md 的 ~~~types 节；工具报错时会列出当前可收类型）。标准明确不收（collect: no）与目录外自造类型会被拒建。纯侦察/信息收集方向留空 = 不带类型。"),
+			"proof":           str("本类型的最小证明物（可选）：本方向拿到什么才算数。缺省用目录里该类型的 proof 文案；有更贴合本方向的证明物可覆盖。只在该方向带 vuln_type 时生效。"),
+			"asset_ids":       map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
+			"parent_ids":      map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
+			"priority":        intp("优先级 0-10；无路线默认5，有真实入口与证据锚点的具体路线默认8，猜测路线默认3。覆盖路线默认值须填 priority_reason。"),
+			"priority_reason": str("调整路线默认优先级的具体理由，不得用类型覆盖绕过停止或预算限制"),
+			"route":           routeSchema(),
+			"route_cap":       intp("可选：覆盖该路线默认 6 次执行意图上限；仅在路线有明确运营理由时设置，设置后持久生效"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {

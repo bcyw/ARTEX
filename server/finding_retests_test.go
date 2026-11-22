@@ -298,7 +298,7 @@ func TestRetestReseedPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Simulate an old DB: replace the prompt with a stale version.
-	if _, err := s.m.pg.SavePrompt(a.ID, "STALE PROMPT v1", "stale", "test"); err != nil {
+	if _, err := s.m.pg.ResetPromptToDefault(a.ID, "STALE PROMPT v1"); err != nil {
 		t.Fatal(err)
 	}
 

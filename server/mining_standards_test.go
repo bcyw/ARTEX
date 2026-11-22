@@ -1,10 +1,69 @@
 package server
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/Autumn-27/artex/agent"
 )
+
+func TestMiningStandardsRouteToolSchemaUpgrade(t *testing.T) {
+	s, _ := newRetestServer(t)
+	pg := s.m.pg
+	oldResolve := agent.ToolResolve
+	t.Cleanup(func() { agent.ToolResolve = oldResolve })
+	wireTools(pg, nil)
+	old, err := pg.GetTool("add_intent")
+	if err != nil || old == nil {
+		t.Fatalf("tool: %v", err)
+	}
+	t.Cleanup(func() { _ = pg.UpdateTool(old.Key, old.Description, old.Schema, mustJSON(old.Agents), old.Enabled) })
+	var schema map[string]any
+	if err := json.Unmarshal(old.Schema, &schema); err != nil {
+		t.Fatal(err)
+	}
+	props := schema["properties"].(map[string]any)
+	delete(props, "priority_reason")
+	routeProps := props["route"].(map[string]any)["properties"].(map[string]any)
+	delete(routeProps, "priority_basis")
+	routeProps["entry"].(map[string]any)["description"] = "custom entry instructions"
+	props["priority"].(map[string]any)["default"] = 2
+	for _, enabled := range []bool{false, true} {
+		if err := pg.UpdateTool("add_intent", "custom description", mustJSON(schema), mustJSON([]string{"planner"}), enabled); err != nil {
+			t.Fatal(err)
+		}
+		_ = pg.SetSetting("route_guidance_tool_schema_v1", "")
+		s.seedOrchestrationTools()
+		row, err := pg.GetTool("add_intent")
+		if err != nil || row == nil {
+			t.Fatal(err)
+		}
+		if row.Enabled != enabled || row.Description != "custom description" || len(row.Agents) != 1 || row.Agents[0] != "planner" {
+			t.Fatalf("custom configuration lost: %+v", row)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(row.Schema, &got); err != nil {
+			t.Fatal(err)
+		}
+		p := got["properties"].(map[string]any)
+		rp := p["route"].(map[string]any)["properties"].(map[string]any)
+		if p["priority_reason"] == nil || rp["priority_basis"] == nil {
+			t.Fatal("old database schema missing route priority fields")
+		}
+		if p["priority"].(map[string]any)["default"] != float64(2) || rp["entry"].(map[string]any)["description"] != "custom entry instructions" {
+			t.Fatal("custom schema fields replaced")
+		}
+	}
+	wireTools(pg, nil)
+	resolved := names(agent.ToolResolve(t.Context(), "planner", agent.NewToolSet(nil, "").PlannerTools()))["add_intent"]
+	if resolved == nil {
+		t.Fatal("planner missing add_intent")
+	}
+	props = resolved.InputSchema()["properties"].(map[string]any)
+	if props["priority_reason"] == nil || props["route"].(map[string]any)["properties"].(map[string]any)["priority_basis"] == nil {
+		t.Fatal("assembled tool uses stale schema")
+	}
+}
 
 func TestMiningStandardsPromptReseed(t *testing.T) {
 	s, _ := newRetestServer(t)
@@ -14,8 +73,8 @@ func TestMiningStandardsPromptReseed(t *testing.T) {
 	}{
 		{"goals", "goals_prompt_src_mining_v4", s.reseedGoalsPrompt},
 		{"mainagent", "mainagent_prompt_src_mining_v3", s.reseedMainAgentPrompt},
-		{"planner", "planner_prompt_src_mining_v6", s.reseedPlannerPrompt},
-		{"worker", "worker_prompt_src_mining_v8", s.reseedWorkerPrompt},
+		{"planner", "planner_prompt_src_mining_v7", s.reseedPlannerPrompt},
+		{"worker", "worker_prompt_src_mining_v9", s.reseedWorkerPrompt},
 		{"pentest", "pentest_prompt_src_mining_v3", s.reseedPentestPrompt},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
@@ -38,7 +97,7 @@ func TestMiningStandardsPromptReseed(t *testing.T) {
 			if err := s.m.pg.SetSetting(tc.flag, ""); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.m.pg.SavePrompt(a.ID, "STALE PROMPT", "fixture", "test"); err != nil {
+			if _, err := s.m.pg.ResetPromptToDefault(a.ID, "STALE PROMPT"); err != nil {
 				t.Fatal(err)
 			}
 			tc.reseed()
@@ -61,5 +120,27 @@ func TestMiningStandardsPromptReseed(t *testing.T) {
 				t.Fatalf("second reseed overwrote customization: %q %v", got, err)
 			}
 		})
+	}
+}
+
+func TestMiningStandardsFirstUpgradePreservesCustomPrompt(t *testing.T) {
+	s, _ := newRetestServer(t)
+	for _, key := range []string{"planner", "worker"} {
+		a, err := s.m.pg.GetAgentByKey(key)
+		if err != nil || a == nil {
+			t.Fatalf("agent: %v", err)
+		}
+		for _, note := range []string{"user edit", "内置默认"} {
+			if _, err = s.m.pg.SavePrompt(a.ID, "MY CUSTOM PROMPT", note, "user"); err != nil {
+				t.Fatal(err)
+			}
+			flag := "test_custom_upgrade_" + key + note
+			_ = s.m.pg.SetSetting(flag, "")
+			s.reseedPromptToDefault(key, flag, agent.BuiltinPromptSeeds()[key], "test")
+			got, err := s.m.pg.CurrentPrompt(a.ID)
+			if err != nil || got != "MY CUSTOM PROMPT" {
+				t.Fatalf("custom overwritten: %q %v", got, err)
+			}
+		}
 	}
 }

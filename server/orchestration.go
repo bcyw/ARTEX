@@ -507,6 +507,7 @@ func (s *Server) seedOrchestrationTools() {
 		_ = s.m.PG().SeedTool(t.Name(), t.Description(), schema, autoAgents)
 	}
 	s.refreshBuiltinToolSchemas()
+	s.seedRouteGuidanceToolSchema()
 	s.seedAutoDefaultBindings()
 	s.seedPlannerDefaultBindings()
 	s.seedPlannerListAssetsBinding()
@@ -530,6 +531,34 @@ func (s *Server) seedOrchestrationTools() {
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
+}
+
+// Only insert the newly introduced optional fields. Existing schema edits,
+// descriptions, enabled flags and bindings remain owned by the user.
+func (s *Server) seedRouteGuidanceToolSchema() {
+	const flag = "route_guidance_tool_schema_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	for _, seed := range agent.BuiltinToolSeeds() {
+		if seed.Key != "add_intent" {
+			continue
+		}
+		raw, err := json.Marshal(seed.Schema)
+		if err != nil {
+			return
+		}
+		for _, path := range []string{"$.properties.route", "$.properties.priority_reason", "$.properties.route.properties.priority_basis"} {
+			_, err = s.m.pg.Exec(`UPDATE tools SET schema=json_insert(schema,$1,json_extract($2,$1)),updated_at=now()
+WHERE key='add_intent' AND system AND json_type(schema,$1) IS NULL`, path, string(raw))
+			if err != nil {
+				log.Printf("[tools] upgrade route guidance schema: %v", err)
+				return
+			}
+		}
+		_ = s.m.pg.SetSetting(flag, "true")
+		return
+	}
 }
 
 // refreshBuiltinToolSchemas propagates code schema/description changes on the
@@ -590,7 +619,7 @@ func (s *Server) unbindGoalMetDefault() {
 // reseedPromptToDefault 是各 reseedXxxPrompt 的共享实现：把指定 agent 的提示词
 // 刷成【当前代码默认】。SeedPromptIfEmpty 首插入 only，旧库已有的版本收不到代码
 // 默认的后续变更，故用版本管理【追加一个新版本】并切过去(ResetPromptToDefault)，
-// 旧版本仍保留在历史里，用户若自定义过可从版本记录找回。settings flag 守卫 →
+// 只升级系统内置版本，自定义版本保持当前内容。settings flag 守卫 →
 // 只做一次，以后默认再变就 bump 各自的 flag；无论成功与否只尝试一次。全新库
 // 无需处理：尚未建 agent 行时由 seedPrompts/seedXxx 直接 seed 最新默认；当前
 // 版本已等于代码默认时短路，不追加重复版本。
@@ -608,6 +637,9 @@ func (s *Server) reseedPromptToDefault(agentKey, flag, tmpl, doneNote string) {
 	}
 	// 全新库已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
 	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
+		return
+	}
+	if builtin, err := s.m.pg.CurrentPromptIsBuiltin(a.ID); err != nil || !builtin {
 		return
 	}
 	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
@@ -629,12 +661,12 @@ func (s *Server) reseedMainAgentPrompt() {
 
 // reseedPlannerPrompt 对齐类型化意图、标准卡与 type_coverage 规划反馈。
 func (s *Server) reseedPlannerPrompt() {
-	s.reseedPromptToDefault("planner", "planner_prompt_src_mining_v6", agent.BuiltinPromptSeeds()["planner"], "技术利用路线与有界续探")
+	s.reseedPromptToDefault("planner", "planner_prompt_src_mining_v7", agent.BuiltinPromptSeeds()["planner"], "高价值路线与有界研究")
 }
 
 // reseedWorkerPrompt 对齐本类标准卡、证明物止损与意图类型锚定。
 func (s *Server) reseedWorkerPrompt() {
-	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v8", agent.BuiltinPromptSeeds()["worker"], "技术利用路线与有界续探")
+	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v9", agent.BuiltinPromptSeeds()["worker"], "高价值路线与有界研究")
 }
 
 // reseedPentestPrompt 对齐独立挖掘的可收类型目录与证明物、止损线。

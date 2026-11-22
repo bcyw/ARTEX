@@ -780,6 +780,16 @@ func (d *DB) SavePrompt(agentID int64, template, note, by string) (int, error) {
 	return ver, tx.Commit()
 }
 
+// CurrentPromptIsBuiltin checks the active version, including restored versions.
+func (d *DB) CurrentPromptIsBuiltin(agentID int64) (bool, error) {
+	var builtin bool
+	err := d.QueryRow(`SELECT COALESCE(p.updated_by,'')='system' AND COALESCE(p.note,'') IN ('内置默认','恢复为内置默认') FROM agents a JOIN agent_prompts p ON p.id=a.current_prompt_id WHERE a.id=$1`, agentID).Scan(&builtin)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return builtin, err
+}
+
 type PromptVersion struct {
 	Version   int       `json:"version"`
 	Template  string    `json:"template_text"`

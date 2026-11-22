@@ -26,6 +26,7 @@ const (
 // 前置条件与验证路径。全部字段可选、原样落 payload——漏洞结果仍归 vuln_type，
 // route 只是路线上下文（ADR-0006：路线与漏洞结果分开）。
 type Route struct {
+	PriorityBasis string   `json:"priority_basis,omitempty"`
 	Family        string   `json:"family"`                  // 技术机制族：deserialization/ssrf/ssti/sqli/组件CVE/文件读写/…
 	Component     string   `json:"component"`               // 涉及组件与版本（可选，已知组件时填）
 	Entry         string   `json:"entry"`                   // 入口：URL/参数/接口
@@ -85,6 +86,67 @@ func routeCap() int {
 		}
 	}
 	return routeDefaultCap
+}
+
+func (t *ToolSet) routePriority(it intentItem) (int, error) {
+	priority := 5
+	if it.Route != nil {
+		priority = 3
+		basis := it.Route.PriorityBasis
+		if strings.TrimSpace(it.Route.Entry) != "" && (basis == "intermediate_evidence" || basis == "controllable_input" || basis == "component_chain") {
+			for _, id := range pidList(it.ParentIDs) {
+				node, err := t.ts.GetNodeWithSources(id)
+				if err == nil && routeEvidenceSignature(node) != "" && t.routeEvidenceMatchesEntry(node, it.Route.Entry) {
+					priority = 8
+					break
+				}
+			}
+		}
+	}
+	if it.Priority != nil {
+		if *it.Priority < 0 || *it.Priority > 10 {
+			return 0, fmt.Errorf("priority 必须在 0-10 范围内")
+		}
+		if it.Route != nil && *it.Priority != priority && strings.TrimSpace(it.PriorityReason) == "" {
+			return 0, fmt.Errorf("调整路线默认优先级 %d 必须提供 priority_reason", priority)
+		}
+		priority = *it.Priority
+	}
+	return priority, nil
+}
+
+// A model's priority claim must be anchored to the same entry, either directly
+// on the fact or through the intent that yielded it. Unrelated evidence cannot
+// promote a stack guess just because it was listed as a parent.
+func (t *ToolSet) routeEvidenceMatchesEntry(node *db.Node, entry string) bool {
+	p, err := payloadMap(node.Payload)
+	if err != nil {
+		return false
+	}
+	if r := routeFromPayload(p); r != nil && strings.TrimSpace(r.Entry) != "" {
+		return normalizeRouteEntry(r.Entry) == normalizeRouteEntry(entry)
+	}
+	edges, err := t.ts.EdgesTouching([]int64{node.ID})
+	if err != nil {
+		return false
+	}
+	for _, edge := range edges {
+		if edge.To != node.ID || edge.Rel != db.RelYields {
+			continue
+		}
+		intent, err := t.ts.GetNodeWithSources(edge.From)
+		if err != nil || intent == nil || intent.Kind != db.KindIntent {
+			continue
+		}
+		ip, err := payloadMap(intent.Payload)
+		if err != nil {
+			continue
+		}
+		if r := routeFromPayload(ip); r != nil && normalizeRouteEntry(r.Entry) == normalizeRouteEntry(entry) {
+			return true
+		}
+	}
+	return false
 }
 
 var (
@@ -235,19 +297,39 @@ func routeSchema() map[string]any {
 		"type":        "object",
 		"description": "技术利用路线（可选，单条意图一条路线；批量时放各元素内）。family/entry 与关键 component/parameter 共同决定稳定身份：同一路线改 summary、payload 或换意图 id 不会重置预算。",
 		"properties": map[string]any{
-			"family":        str("技术机制族（开放词表：deserialization/ssrf/ssti/sqli/组件CVE/文件读写/命令执行等）"),
-			"component":     str("涉及组件与版本；未知/自定义代码可写 custom:<名称>"),
-			"entry":         str("真实入口 URL/参数/接口"),
-			"parameter":     str("相关参数或组件身份（可选，但同一入口下有多个参数时应填）"),
-			"prerequisites": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "路线成立所需的前置条件（可选，逐条可证伪）"},
-			"hypothesis":    str("利用假设：为什么认为这条路走得通"),
-			"next_step":     str("下一步具体验证动作"),
-			"tested":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "已测变体（结构化，用于避免重复 payload）"},
-			"remaining":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "尚未验证的关键假设/变体"},
-			"outcome":       str("最近结果（可选）：progress/negative/blocked/no_interaction/service_unavailable/observation_incomplete/insufficient_impact/prerequisite_disproved/variants_exhausted/impact。结论性结果请同时写成 fact（带 route 与 outcome），供续探预算读取。"),
-			"reason":        str("结果依据（一行，可选）"),
+			"priority_basis": str("优先级依据：intermediate_evidence / controllable_input / component_chain / stack_guess。前三项须以 parent_ids 中的实际证据锚定同一真实入口（事实 route.entry 或产生它的意图 route.entry），否则按低优先级处理。"),
+			"family":         str("技术机制族（开放词表：deserialization/ssrf/ssti/sqli/组件CVE/文件读写/命令执行等）"),
+			"component":      str("涉及组件与版本；未知/自定义代码可写 custom:<名称>"),
+			"entry":          str("真实入口 URL/参数/接口"),
+			"parameter":      str("相关参数或组件身份（可选，但同一入口下有多个参数时应填）"),
+			"prerequisites":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "路线成立所需的前置条件（可选，逐条可证伪）"},
+			"hypothesis":     str("利用假设：为什么认为这条路走得通"),
+			"next_step":      str("下一步具体验证动作"),
+			"tested":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "已测变体（结构化，用于避免重复 payload）"},
+			"remaining":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "尚未验证的关键假设/变体"},
+			"outcome":        str("最近结果（可选）：progress/negative/blocked/no_interaction/service_unavailable/observation_incomplete/insufficient_impact/prerequisite_disproved/variants_exhausted/impact。结论性结果请同时写成 fact（带 route 与 outcome），供续探预算读取。"),
+			"reason":         str("结果依据（一行，可选）"),
 		},
 	}
+}
+
+func routeExcerpt(s string) string {
+	r := []rune(s)
+	if len(r) > 240 {
+		return string(r[:240]) + "…"
+	}
+	return s
+}
+
+func routeExcerpts(items []string) []string {
+	if len(items) > 6 {
+		items = items[len(items)-6:]
+	}
+	out := make([]string, len(items))
+	for i, s := range items {
+		out[i] = routeExcerpt(s)
+	}
+	return out
 }
 
 func routeStateSummary(st *RouteState) map[string]any {
@@ -255,18 +337,19 @@ func routeStateSummary(st *RouteState) map[string]any {
 	return map[string]any{
 		"latest_node_id":   st.LatestNodeID,
 		"id":               st.ID,
-		"family":           st.Family,
-		"entry":            st.Entry,
-		"component":        st.Component,
-		"parameter":        st.Parameter,
-		"prerequisites":    st.Prerequisites,
-		"hypothesis":       st.Hypothesis,
-		"next_step":        st.NextStep,
-		"tested":           st.Tested,
-		"remaining":        remaining,
-		"consumed_basis":   st.ConsumedBasis,
+		"family":           routeExcerpt(st.Family),
+		"entry":            routeExcerpt(st.Entry),
+		"component":        routeExcerpt(st.Component),
+		"parameter":        routeExcerpt(st.Parameter),
+		"prerequisites":    routeExcerpts(st.Prerequisites),
+		"hypothesis":       routeExcerpt(st.Hypothesis),
+		"next_step":        routeExcerpt(st.NextStep),
+		"tested":           routeExcerpts(st.Tested),
+		"tested_total":     len(st.Tested),
+		"remaining":        routeExcerpts(remaining),
+		"remaining_total":  len(remaining),
 		"outcome":          st.Outcome,
-		"reason":           st.Reason,
+		"reason":           routeExcerpt(st.Reason),
 		"intents":          st.Intents,
 		"open_intents":     st.OpenIntents,
 		"information_free": st.InformationFree,
@@ -425,7 +508,13 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 			continue
 		}
 		st.LatestNodeID = max(st.LatestNodeID, n.ID)
-		if r != nil && routeStopOutcome(r.Outcome) && !isInferredFact(p) {
+		confirmed := !isInferredFact(p)
+		if r != nil && normalizeRoutePart(r.Outcome) == "negative" {
+			confidence, _ := p["confidence"].(string)
+			evidence, _ := p["evidence"].(string)
+			confirmed = strings.EqualFold(strings.TrimSpace(confidence), "observed") && strings.TrimSpace(evidence) != ""
+		}
+		if r != nil && routeStopOutcome(r.Outcome) && confirmed {
 			st.Stopped = true
 		}
 		if r != nil {
@@ -613,12 +702,11 @@ func substantiveRouteOutcome(outcome string) bool {
 	}
 }
 
-// routeStopOutcome lists only outcomes that terminate a route. "negative" is
-// deliberately excluded: one valid negative variant does not close the route;
-// prerequisite_disproved, variants_exhausted and impact do.
+// A confirmed route-level negative closes the route; an inconclusive variant
+// belongs in tested with a progress/blocked result instead.
 func routeStopOutcome(outcome string) bool {
 	switch normalizeRoutePart(outcome) {
-	case strings.ReplaceAll(routeOutcomeImpact, "_", ""),
+	case "negative", strings.ReplaceAll(routeOutcomeImpact, "_", ""),
 		strings.ReplaceAll(routeOutcomePrerequisiteDisproved, "_", ""),
 		strings.ReplaceAll(routeOutcomeVariantsExhausted, "_", ""):
 		return true
