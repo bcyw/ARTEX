@@ -15,7 +15,7 @@ func TestHuntingFocusGuidanceInjection(t *testing.T) {
 		"挖掘方向", "可收性 × 危害", "规范类型名", "触发启发式",
 		"注入类", "命令执行与反序列化", "SSRF", "认证绕过与账户接管",
 		"存储型 XSS", "文件上传 getshell", "业务逻辑",
-		"越权", "同类上限", "别名折叠", "自成一桶", "绝不拒收",
+		"越权", "同类上限", "别名折叠", "自成一桶", "没有类型化意图锚定时",
 		"机器可查目录", "~~~types",
 	} {
 		if !strings.Contains(g, want) {
