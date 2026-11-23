@@ -57,7 +57,7 @@ func TestAcceptanceRouteReconToTypedVerificationGate(t *testing.T) {
 		"summary": "DNS 回调已确认", "confidence": "observed",
 		"evidence": "dns probe-1 from 198.51.100.9",
 		"outcome":  "progress",
-		"route":    map[string]any{"entry": "https://example.test/import", "family": "deserialization", "component": "custom-parser"},
+		"route":    route,
 	}, 8, "confirmed", "worker", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestAcceptanceRouteReconToTypedVerificationGate(t *testing.T) {
 	if err := ts.Link(reconID, db.RelYields, fact); err != nil {
 		t.Fatal(err)
 	}
-	route2 := map[string]any{"entry": "https://example.test/import", "family": "deserialization", "component": "custom-parser", "tested": []string{"dns-gadget"}}
+	route2 := map[string]any{"entry": route["entry"], "family": route["family"], "component": route["component"], "tested": []string{"dns-gadget"}}
 	out, failed = callIntent(t, tools, map[string]any{
 		"summary": "正式验证反序列化 RCE 危害", "vuln_type": "测试甲类", "proof": "甲类最小证明物",
 		"parent_ids": []int64{fact}, "route": route2,
@@ -73,14 +73,20 @@ func TestAcceptanceRouteReconToTypedVerificationGate(t *testing.T) {
 	if failed {
 		t.Fatalf("证据充分后的可收类型正式验证应被允许: %s", out)
 	}
+	// 意图确实建立，且 vuln_type/proof 按目录校验结果落库（而非仅"未报错"）。
+	typedID := parseCreatedIntentID(t, out)
+	typedPayload := routeIntentPayload(t, ts, typedID)
+	if typedPayload["vuln_type"] != "测试甲类" || typedPayload["proof"] != "甲类最小证明物" {
+		t.Fatalf("可收类型正式验证意图应带目录类型与证明物落库: %v", typedPayload)
+	}
 
 	// ③ 目录校验不被路线绕开：collect: no、未知类型仍拒绝。
 	out, failed = callIntent(t, tools, map[string]any{"summary": "验证拒收类", "vuln_type": "测试拒收类", "route": route2})
 	if !failed {
 		t.Fatalf("collect: no 类型不得因路线存在而放行: %s", out)
 	}
-	if !strings.Contains(out, "collect") && !strings.Contains(out, "不收") && !strings.Contains(out, "拒收") {
-		t.Fatalf("拒收文案应引用目录规则: %s", out)
+	if !strings.Contains(out, "测试拒收类") || !strings.Contains(out, "真实影响") {
+		t.Fatalf("拒收文案应引用目录条目及其 stop 规则: %s", out)
 	}
 	out, failed = callIntent(t, tools, map[string]any{"summary": "验证未知类型", "vuln_type": "完全未知名型", "route": route2})
 	if !failed {
