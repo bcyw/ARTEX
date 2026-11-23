@@ -1,123 +1,80 @@
 # AGENTS.md
 
-ARTEX is an LLM multi-agent autonomous pentest system: a Go 1.27.4+ backend that serves an embedded Next.js 16 static export, with all business data in an embedded pure-Go SQLite (no CGO, no PostgreSQL).
+ARTEX is an LLM multi-agent pentest system: a Go backend embeds a Next.js static export; business data uses pure-Go SQLite, without a database service or CGO.
 
 ## 交流约定
 
 - 与用户的一切交流使用简体中文：进度说明、提问、方案确认、总结与代码评审意见。
 - 代码、标识符、提交信息以及仓库内既有的英文文档保持原样，不因本条规则而翻译。
 
-## Agent skills
+## Context and boundaries
 
-### Issue tracker
+- Keep Go imports under `github.com/Autumn-27/artex`; the maintained repository and hardcoded self-update source (`selfupdate/github.go`) are `bcyw/ARTEX`.
+- Before domain work, read `GLOSSARY.md` and relevant `docs/adr/` decisions; follow `docs/agents/domain.md` for terminology and ADR conflicts.
+- For specs/issues, use the local Markdown tracker in `.scratch/<feature>/`: read `docs/agents/issue-tracker.md`; for triage, read `docs/agents/triage-labels.md` (`Status:` lines, not GitHub labels).
+- `.scratch/` is gitignored. Under `docs/`, only `docs/agents/` and `docs/adr/` are unignored; older design references in code may be unavailable.
+- Wiring: `cmd/artex/main.go` → `server.Manager` (task/store lifetimes) → `server.Engine` (planner/worker loops); HTTP routes are registered in `server/server.go`.
+- The asset graph is global; the exploration graph is task-private, linked through `exploration_anchors`. Code computes asset dedup keys from raw observations. Graph changes wake the planner; workers execute one intent and write facts/findings back.
+- `skills/` contains application runtime skills. For `tools/*.yaml` recipes and their strict-argv execution, read `tools/README.md`.
+- Production has no Node runtime: dynamic behavior belongs behind Go `/api`, not Next server actions or dynamic route handlers. UI copy is Chinese.
 
-Issues and specs live as markdown files under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+## Development and verification
 
-### Triage labels
-
-The five default roles (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`), recorded as `Status:` lines in issue files. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
-
-## Repo identity — do not "fix" these
-
-- Go module is `github.com/Autumn-27/artex` even though the maintained repo is `bcyw/ARTEX`; imports intentionally keep the old path.
-- In-page self-update is hardcoded to `bcyw/ARTEX` in `selfupdate/github.go`. Change it only deliberately.
-- This is a self-maintained v1.x fork with a fresh SQLite schema; there is no PostgreSQL data/config migration path.
-
-## Toolchain
-
-Go 1.27.4+, Node.js 22+, Python 3.12, plus `zip`/`rsync` for `build.sh`. SQLite is embedded in the binary — never add a database service.
-
-## Commands
+Go version comes from `go.mod` (currently 1.27.4); CI uses Node.js 22 and Python 3.12. Run npm commands in `web/` using its `package-lock.json`.
 
 ```bash
-# Full dev stack: backend :8787, recording proxy :8788, Next dev :5173
+# Install frontend dependencies before starting the dev stack
+(cd web && npm ci)
+# Backend :8787, recording proxy :8788, Next dev 127.0.0.1:5173
 ./dev.sh
 # Backend only (no embedded UI)
 go run ./cmd/artex -addr :8787 -proxy 127.0.0.1:8788
 
-# Go checks (agent/db/evidence/server tests use an isolated temp SQLite DB)
-go test ./...
+# Backend checks; replace ./server and the regex for a focused package/test
+go test ./... -count=1 -timeout 180s
+go test ./server -run '^TestExecPython$' -count=1
 go vet ./...
-go test -race ./server -run '^(TestTerminalTask|TestTimedOutTask|TestRunningTaskAdmission|TestStopTask)' -count=1 -timeout 180s
-go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 go mod verify
-
-# Embedded single binary
-cd web && npm ci && npm run build:static && cd ..
-rsync -a --delete web/out/ server/webui/dist/   # or cp -R web/out/. server/webui/dist/
-go build -tags embedui -o artex ./cmd/artex
-
-# Release artifacts (5 targets, zip + SHA256SUMS in dist/)
-./build.sh --release
-ARTEX_TARGETS=linux/amd64 ./build.sh --release
+go test -race ./server -run '^(TestTerminalTask|TestTimedOutTask|TestRunningTaskAdmission|TestStopTask)' -count=1 -timeout 180s
+python3 -m unittest discover -s scripts -p 'test_*.py' -v
 ```
 
-Frontend commands run from `web/`:
+From `web/`:
 
 ```bash
-npm ci
 npm run typecheck
-npm run lint          # baseline gate, see below
-npm test              # node --experimental-strip-types --test tests/*.test.ts
-npm run build:static  # release export → web/out (sets NEXT_EXPORT=1)
+npm run lint
+npm test
+node --experimental-strip-types --test tests/navigation.test.ts  # one test file
+npm run build:static
 ```
 
-- `npm run build` is a plain `next build`, not the release artifact.
-- `NEXT_PUBLIC_MOCK=1 npm run dev` renders the UI from mock data with no backend.
-- Format/lint with Biome (`npm run check:fix`, `npm run format`), not Prettier/ESLint: 120-column lines, double quotes, trailing commas.
+- Dev `/api` requests proxy to `http://localhost:8787`; override with `AUTOPENTEST_API`. `NEXT_PUBLIC_MOCK=1 npm run dev` previews without a backend.
+- `agent`, `db`, `evidence`, and `server` tests isolate SQLite via `internal/testdb`; keep tests away from real `data/`. `TestExecPython` discovers `python3`, skips if absent, or uses the interpreter path in `ARTEX_TEST_PYTHON`.
+- Frontend formatting uses Biome (`npm run check:fix`, `npm run format`). `npm run lint` rejects both new errors and resolved debt still listed in `web/lint-baseline.json`; use `npm run lint:baseline` to regenerate and review the diff. `npm run lint:strict` shows all debt.
+- After theme CSS changes, run `npm run generate:presets`; it updates the generated section of `web/src/lib/preferences/theme.ts`. `web/.husky/pre-commit` runs this, stages that file, then runs lint-staged.
+- For full gates and fresh-DB smoke setup, follow `.github/workflows/ci.yml`: it also runs `govulncheck@v1.9.0`, npm audit, and browser-extension checks. Smoke tests must isolate both `ARTEX_DB_PATH` and `-data`.
+- Launcher edits must preserve LF without BOM for shell scripts and ASCII CRLF for `start.bat`; focused check: `python3 -m unittest discover -s scripts -p test_launchers.py -v`.
 
-### Lint baseline
+## Data and standards
 
-`npm run lint` compares Biome errors per file/category/message against `web/lint-baseline.json`. It fails on new errors **and** on baseline entries that became stale. `npm run lint:strict` shows all existing debt. Regenerate the baseline only with `npm run lint:baseline` and review its JSON diff.
-
-`web/.husky/pre-commit` regenerates `src/lib/preferences/theme.ts`, stages it, then runs lint-staged; bypassing it leaves generated theme metadata stale.
-
-### Script tests and CI order
-
-```bash
-python -m unittest discover -s scripts -p 'test_*.py' -v
-```
-
-CI enforces that Unix shell scripts are LF without BOM and `start.bat` is ASCII CRLF. Full CI order: `go test` → `go vet` → race subset → `govulncheck` → `npm ci && typecheck && lint && test && npm audit --audit-level=low && build:static` → Python tests → browser-extension `node --check`/`node --test` → build with `-tags embedui` and smoke `/api/health` against a temporary `ARTEX_DB_PATH`.
-
-## Layout
-
-- `cmd/artex/main.go` — flags `-addr`, `-proxy`, `-data`, `-reset-password`; startup and self-update bootstrap.
-- `server/` — `net/http` routes registered in `server/server.go` (Go method patterns), JWT/SSE, `Manager` (task/store lifetimes), `Engine` (planner loop + workers, timeouts).
-- `agent/` — goals/planner/worker/mainagent/pentest/retester/auto agents on the `norma` SDK; tools expose the two graphs.
-- `db/` — both graphs plus business data; embedded `db/schema.sql`.
-- Support packages: `traffic/` MITM recorder, `intercept/` + `guard/` approval gate, `enrich/` async DNS/HTTP completion, `llmpool/` LLM failover, `llmrec/` request recording, `mcphttp/` remote MCP, `notify/`, `report/`, `evidence/`, `selfupdate/`.
-- `web/src/app` — App Router; `@/*` alias maps to `web/src/*`; UI copy is Chinese.
-- `skills/` runtime agent skills; `tools/*.yaml` strict-argv tool recipes (see `tools/README.md`).
-- `standards/src-acceptance.md` SRC 漏洞收取标准（类型目录/证据线/定级纪律），以代码固定段注入能产出 finding 的 agent 提示，不受 DB 模板影响。文末 `~~~types` 目录是唯一机器来源：planner 选可收类型建意图，worker 按标准卡取证，上报类型与意图锚定；`collect: no` 规划拒建、上报拒收并引导 fact。热改后下次读取即生效，无需重编译或重启；修改标准时同步 `agent/srcstandards.go` 内嵌副本。
-
-### Dual graph
-
-A global asset graph (`assets`, `companies`, `task_scope`) is shared across tasks; each task has a private exploration graph (`exploration_nodes` + anchors + activity). `exploration_anchors` links the two. The program computes asset dedup keys — agents only submit raw observations. The engine is event-driven: graph changes wake the planner, which dispatches intents; workers execute one intent and write facts/findings back.
-
-## SQLite schema
-
-`db/schema.sql` plus the `llm_records` and `llm_usage` schemas are executed on every startup, then `PRAGMA user_version=1`. There is **no migration framework and no `ALTER TABLE` path**: adding a column to an existing table requires explicit migration code or a fresh data directory. Startup refuses a DB whose `user_version > 1`. Built-in agents and intercept rules are seeded during initialization.
+- `db/db.go` reapplies `db/schema.sql` plus LLM record/usage schemas at startup and sets `user_version=1`; versions above 1 are rejected. There is no schema migration framework: editing `CREATE TABLE IF NOT EXISTS` does not add columns to existing tables. Plan explicit migration code or a fresh test data directory.
+- Queries are native SQLite SQL. `db/sqlite.go` normalizes Go values/results, not PostgreSQL syntax; legacy `pg*` names do not imply a PostgreSQL backend. There is no old PostgreSQL data/config migration path.
+- SRC acceptance rules in `standards/src-acceptance.md` are injected independently of DB prompt templates. Its `~~~types` catalog drives planning and reporting (`collect: no` is rejected). When editing it, synchronize `srcAcceptanceDefault` in `agent/srcstandards.go`; that is the fallback when the disk file is missing. Disk edits take effect on the next read.
 
 ## Runtime gotchas
 
-- `start.sh` / `start.bat` is the supported entrypoint: it supervises `artex` and relaunches on exit code 75 for page-driven update/rollback. Running `./artex` directly breaks that flow; `-h` is fine.
-- In-page update is disabled for `dev` or dirty `git describe` builds, and for Docker (`ARTEX_VERSION` defaults to `dev`). Docker upgrades use `./update.sh` or `git pull && docker compose up -d --build artex`.
-- `start.sh` does **not** read `.env`; export env vars yourself, or use Docker Compose (`ARTEX_UPDATE_GITHUB_TOKEN`, `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`, `ARTEX_LLM_*`).
+- Launch distributed binaries through `start.sh` / `start.bat`: page-driven update/rollback requires their restart-on-exit-75 supervision. `start.sh` does not load `.env`; export variables or use Docker Compose.
+- In-page update is disabled for Docker and non-comparable versions such as `dev` or dirty `git describe` output. Docker upgrades use `./update.sh` or `git pull && docker compose up -d --build artex`.
 - Config resolution: `ARTEX_CONFIG` → `./config.json` (CWD) → executable directory. `ARTEX_DB_PATH` overrides `database.path`. Under `go run`, `config.BaseDir()` falls back to CWD.
 - Runtime data lives in `data/` (SQLite + WAL/SHM, `traffic/`, evidence, archives) and is gitignored. The file manager is confined to `data/workspace/`; keep `ARTEX_DB_PATH` outside it.
-- Tests: `agent`, `db`, `evidence`, and `server` use `internal/testdb`, which points `ARTEX_DB_PATH` at a per-package temp dir; tests must never touch `data/`. `TestExecPython` skips without `python3`; set `ARTEX_TEST_PYTHON` to run it.
-- Admin password reset: `./reset-password.sh` (or pipe to `./artex -reset-password`); it revokes all existing sessions.
+- Admin password reset: `./reset-password.sh`; it revokes all existing sessions.
 - SSE is same-origin; reverse proxies must disable buffering and use long read timeouts. `NEXT_PUBLIC_SSE_BASE` is baked in at build time.
-- Frontend output is a pure static export with no Node runtime in production: do not add server actions or dynamic route handlers; put dynamic behavior behind the Go `/api`.
-- Code comments reference `docs/...` design documents that are gitignored and absent from the repo — infer behavior from code instead of looking for them.
 
-## Release
+## Embedded builds and releases
 
-- Tags must match `vMAJOR.MINOR.PATCH[-prerelease]` (no build metadata). Pushing `v*` runs CI, cross-builds five targets, packages the browser extension, pushes GHCR images, and creates the GitHub Release.
-- `scripts/release_notes.py` requires a matching `## [x.y.z]` section in `CHANGELOG.md`, or the release job fails; add the changelog entry with the version bump.
-- `build.sh` derives the version from `git describe --tags --always --dirty`; set `ARTEX_BUILD_VERSION` for reproducible clean builds.
+- `npm run build:static` sets `NEXT_EXPORT=1` and creates `web/out/`; plain `npm run build` is not the release export. Copy the **contents** into `server/webui/dist/` before building with `-tags embedui`.
+- `./build.sh` handles npm install, static export, `rsync`, and the embedded build; output defaults to `dist/artex-<os>-<arch>/artex` (`.exe` on Windows). Requires `rsync`; packaging also requires `zip`.
+- `./build.sh --release` packages five targets plus checksums; narrow it with `ARTEX_TARGETS=linux/amd64 ./build.sh --release`. Set `ARTEX_SKIP_FRONTEND=1` only when `server/webui/dist/` already contains the intended export.
+- `scripts/version.sh` resolves `git describe --tags --always --dirty`; override with `ARTEX_BUILD_VERSION`. Plain `go build` leaves `main.version=dev` unless linker flags set it.
+- Before pushing a release tag, follow `.github/workflows/release.yml`: tags must be `vMAJOR.MINOR.PATCH[-prerelease]` (no build metadata), with a matching `## [version]` in `CHANGELOG.md` for `scripts/release_notes.py`. Only the highest stable tag promotes `latest`.
