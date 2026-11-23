@@ -67,3 +67,4 @@ Thumbs.db
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+artex.log
