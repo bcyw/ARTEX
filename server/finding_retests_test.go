@@ -294,7 +294,7 @@ func TestRetestReseedPrompt(t *testing.T) {
 	}
 	// 包内测试共享同一个 SQLite：先跑的其他测试可能已让完整 Server 启动路径
 	// 消费过 reseed flag。这里显式复位，保证本测试与执行顺序无关。
-	if err := s.m.pg.SetSetting("retester_prompt_src_acceptance_v1", ""); err != nil {
+	if err := s.m.pg.SetSetting("retester_prompt_src_acceptance_v2", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Simulate an old DB: replace the prompt with a stale version.

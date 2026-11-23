@@ -5,6 +5,32 @@ import (
 	"testing"
 )
 
+// Validate the templates directly: renderSystem's fallback can hide a broken
+// built-in body, so successful assembly alone does not prove it can be rendered.
+func TestBuiltinPromptTemplatesRender(t *testing.T) {
+	for _, tc := range []struct {
+		key  string
+		body string
+		vars any
+	}{
+		{"goals", goalsDefaultTmpl, GoalsVars{}},
+		{"planner", plannerDefaultTmpl, PlannerVars{Goal: "test goal"}},
+		{"worker", workerDefaultTmpl, WorkerVars{}},
+		{"mainagent", mainAgentDefaultTmpl, MainVars{Goal: "test goal"}},
+		{"auto", autoDefaultTmpl, chatVars{}},
+		{"pentest", pentestDefaultTmpl, chatVars{}},
+		{"reporter", ReporterDefaultPrompt, chatVars{}},
+		{"retester", RetesterDefaultPrompt, chatVars{}},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			body, err := renderTmpl(tc.body, tc.vars)
+			if err != nil || strings.TrimSpace(body) == "" {
+				t.Fatalf("default prompt does not render: %v", err)
+			}
+		})
+	}
+}
+
 func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	t.Cleanup(func() { PromptOverride = nil })
 

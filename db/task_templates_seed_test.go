@@ -1,6 +1,7 @@
 package db
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -121,8 +122,7 @@ func TestSeedTaskTemplatesIdempotent(t *testing.T) {
 	}
 }
 
-// TestSeedTaskTemplatesUserEditNotClobbered is the second Open on the same DB:
-// a fresh process must treat existing names as "already there" and skip them.
+// A fresh process must preserve customized presets.
 func TestSeedTaskTemplatesUserEditNotClobbered(t *testing.T) {
 	dsn := testDSN(t)
 	d, err := Open(dsn)
@@ -146,5 +146,109 @@ func TestSeedTaskTemplatesUserEditNotClobbered(t *testing.T) {
 	defer d2.Close()
 	if got := findTaskTemplate(t, d2, "批量资产全量渗透"); got == nil || got.Goal != newGoal {
 		t.Fatalf("second open overwrote user edit: %+v", got)
+	}
+}
+
+func TestSeedTaskTemplatesUpgradeLegacyDefaults(t *testing.T) {
+	dsn := testDSN(t)
+	d, err := Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	previous := make(map[string]*TaskTemplate)
+	for name, goal := range legacyTaskTemplateGoals {
+		template := findTaskTemplate(t, d, name)
+		if template == nil {
+			t.Fatalf("missing template %q", name)
+		}
+		previous[name], err = d.PatchTaskTemplate(template.ID, TaskTemplatePatch{Goal: &goal})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	for _, preset := range builtinTaskTemplates {
+		got := findTaskTemplate(t, upgraded, preset.Name)
+		old := previous[preset.Name]
+		if got == nil || old == nil || got.ID != old.ID || got.Goal != preset.Goal ||
+			got.Description != old.Description || !reflect.DeepEqual(got.CategoryID, old.CategoryID) ||
+			!got.CreatedAt.Equal(old.CreatedAt) {
+			t.Fatalf("legacy preset %q not upgraded in place: old=%+v got=%+v", preset.Name, old, got)
+		}
+	}
+	before, err := upgraded.ListTaskTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.seedTaskTemplates(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := upgraded.ListTaskTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("re-seeding changed already upgraded templates")
+	}
+}
+
+func TestSeedTaskTemplatesPreserveLegacyCustomization(t *testing.T) {
+	for _, field := range []string{"goal", "description", "category", "no category", "name"} {
+		t.Run(field, func(t *testing.T) {
+			d := mustOpenSeed(t)
+			preset := builtinTaskTemplates[0]
+			template := findTaskTemplate(t, d, preset.Name)
+			if template == nil {
+				t.Fatal("missing template")
+			}
+			goal := legacyTaskTemplateGoals[preset.Name]
+			if _, err := d.PatchTaskTemplate(template.ID, TaskTemplatePatch{Goal: &goal}); err != nil {
+				t.Fatal(err)
+			}
+			var patch TaskTemplatePatch
+			custom := "用户自定义内容"
+			switch field {
+			case "goal":
+				patch.Goal = &custom
+			case "description":
+				patch.Description = &custom
+			case "category":
+				category, err := d.CreateTaskCategory(custom)
+				if err != nil {
+					t.Fatal(err)
+				}
+				patch.CategoryID, patch.SetCategoryID = &category.ID, true
+			case "no category":
+				patch.SetCategoryID = true
+			case "name":
+				patch.Name = &custom
+			}
+			if _, err := d.PatchTaskTemplate(template.ID, patch); err != nil {
+				t.Fatal(err)
+			}
+			before, err := d.GetTaskTemplate(template.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.seedTaskTemplates(); err != nil {
+				t.Fatal(err)
+			}
+			after, err := d.GetTaskTemplate(template.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Fatalf("legacy %s customization overwritten: before=%+v after=%+v", field, before, after)
+			}
+		})
 	}
 }

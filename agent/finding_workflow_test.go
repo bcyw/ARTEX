@@ -32,6 +32,9 @@ func TestFindingWorkflowSharedAssemblyAndSwitch(t *testing.T) {
 			if !strings.HasPrefix(system[0], "USER CUSTOM PROMPT") {
 				t.Fatal("custom prompt replaced")
 			}
+			if !strings.Contains(system[0], "~~~types") || strings.Count(system[0], "**中高危挖掘导向**") != 1 {
+				t.Fatalf("%s: SRC standards must be injected once regardless of binding switch: %v", role, on)
+			}
 			if strings.Contains(system[0], "traffic_refs") != on {
 				t.Fatalf("%s: guidance ignored switch: %v", role, on)
 			}
@@ -58,11 +61,22 @@ func TestFindingWorkflowSharedAssemblyAndSwitch(t *testing.T) {
 			}
 		}
 	}
-	on = true
 	ToolResolve = func(context.Context, string, []actool.CoreTool) []actool.CoreTool { return nil }
-	out, def, cleanup := AugmentTools(t.Context(), "planner", []actool.CoreTool{ts.addFinding()})
-	defer cleanup()
-	if len(out) != 0 || def.FindingGuidance != "" {
-		t.Fatal("reintroduced disabled tool or its guidance")
+	for _, enabled := range []bool{false, true} {
+		on = enabled
+		out, def, cleanup := AugmentTools(t.Context(), "planner", []actool.CoreTool{ts.addFinding()})
+		cleanup()
+		if len(out) != 0 || def.FindingGuidance != "" {
+			t.Fatal("reintroduced disabled tool or its guidance")
+		}
+	}
+	ToolResolve = nil
+	for _, enabled := range []bool{false, true} {
+		on = enabled
+		_, def, cleanup := AugmentTools(t.Context(), "read-only", []actool.CoreTool{ts.listFindings()})
+		cleanup()
+		if strings.Contains(def.FindingGuidance, "~~~types") {
+			t.Fatal("read-only role received mining instructions")
+		}
 	}
 }

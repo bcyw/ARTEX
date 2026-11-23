@@ -67,15 +67,22 @@ func TestMiningStandardsRouteToolSchemaUpgrade(t *testing.T) {
 
 func TestMiningStandardsPromptReseed(t *testing.T) {
 	s, _ := newRetestServer(t)
+	s.seedOrchestrationTools()
+	defaults := agent.BuiltinPromptSeeds()
+	defaults["reporter"] = agent.ReporterDefaultPrompt
+	defaults["retester"] = agent.RetesterDefaultPrompt
 	for _, tc := range []struct {
 		key, flag string
 		reseed    func()
 	}{
-		{"goals", "goals_prompt_src_mining_v4", s.reseedGoalsPrompt},
-		{"mainagent", "mainagent_prompt_src_mining_v3", s.reseedMainAgentPrompt},
-		{"planner", "planner_prompt_src_mining_v7", s.reseedPlannerPrompt},
-		{"worker", "worker_prompt_src_mining_v9", s.reseedWorkerPrompt},
-		{"pentest", "pentest_prompt_src_mining_v3", s.reseedPentestPrompt},
+		{"goals", "goals_prompt_src_mining_v5", s.reseedGoalsPrompt},
+		{"mainagent", "mainagent_prompt_src_mining_v4", s.reseedMainAgentPrompt},
+		{"auto", "auto_prompt_src_mining_v1", s.reseedAutoPrompt},
+		{"planner", "planner_prompt_src_mining_v8", s.reseedPlannerPrompt},
+		{"worker", "worker_prompt_src_mining_v10", s.reseedWorkerPrompt},
+		{"pentest", "pentest_prompt_src_mining_v4", s.reseedPentestPrompt},
+		{"reporter", "reporter_prompt_concise_v3", s.reseedReporterPrompt},
+		{"retester", "retester_prompt_src_acceptance_v2", s.reseedRetesterPrompt},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
 			a, err := s.m.pg.GetAgentByKey(tc.key)
@@ -97,7 +104,8 @@ func TestMiningStandardsPromptReseed(t *testing.T) {
 			if err := s.m.pg.SetSetting(tc.flag, ""); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.m.pg.ResetPromptToDefault(a.ID, "STALE PROMPT"); err != nil {
+			staleVersion, err := s.m.pg.ResetPromptToDefault(a.ID, "STALE PROMPT")
+			if err != nil {
 				t.Fatal(err)
 			}
 			tc.reseed()
@@ -105,11 +113,20 @@ func TestMiningStandardsPromptReseed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != agent.BuiltinPromptSeeds()[tc.key] {
+			if got != defaults[tc.key] {
 				t.Fatalf("%s not upgraded to current default", tc.key)
 			}
 			if got, _, err := s.m.pg.GetSetting(tc.flag); err != nil || got != "true" {
 				t.Fatalf("new flag not consumed: %q %v", got, err)
+			}
+			versions, err := s.m.pg.ListPromptVersions(a.ID)
+			if err != nil || len(versions) < 2 || versions[0].Version != staleVersion+1 || versions[1].Template != "STALE PROMPT" {
+				t.Fatalf("upgrade did not append a version preserving history: %+v %v", versions, err)
+			}
+			tc.reseed()
+			after, err := s.m.pg.ListPromptVersions(a.ID)
+			if err != nil || len(after) != len(versions) {
+				t.Fatalf("repeated reseed appended a duplicate version: %v", err)
 			}
 			if _, err := s.m.pg.SavePrompt(a.ID, "USER CUSTOM PROMPT", "user edit", "test"); err != nil {
 				t.Fatal(err)
@@ -125,7 +142,11 @@ func TestMiningStandardsPromptReseed(t *testing.T) {
 
 func TestMiningStandardsFirstUpgradePreservesCustomPrompt(t *testing.T) {
 	s, _ := newRetestServer(t)
-	for _, key := range []string{"planner", "worker"} {
+	s.seedOrchestrationTools()
+	defaults := agent.BuiltinPromptSeeds()
+	defaults["reporter"] = agent.ReporterDefaultPrompt
+	defaults["retester"] = agent.RetesterDefaultPrompt
+	for key, prompt := range defaults {
 		a, err := s.m.pg.GetAgentByKey(key)
 		if err != nil || a == nil {
 			t.Fatalf("agent: %v", err)
@@ -136,7 +157,7 @@ func TestMiningStandardsFirstUpgradePreservesCustomPrompt(t *testing.T) {
 			}
 			flag := "test_custom_upgrade_" + key + note
 			_ = s.m.pg.SetSetting(flag, "")
-			s.reseedPromptToDefault(key, flag, agent.BuiltinPromptSeeds()[key], "test")
+			s.reseedPromptToDefault(key, flag, prompt, "test")
 			got, err := s.m.pg.CurrentPrompt(a.ID)
 			if err != nil || got != "MY CUSTOM PROMPT" {
 				t.Fatalf("custom overwritten: %q %v", got, err)

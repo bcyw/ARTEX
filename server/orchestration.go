@@ -516,11 +516,12 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedWorkerReadbackRebind()  // 修复旧迁移误删：把 search_all_worker_traces/get_worker_trace/node_detail 补绑回 worker(一次性)
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
-	s.reseedGoalsPrompt()               // goals:目标类型对齐可收目录(一次性)
-	s.reseedMainAgentPrompt()           // mainagent:直投意图对齐类型目录(一次性)
-	s.reseedPlannerPrompt()             // planner:类型化意图与 type_coverage(一次性)
-	s.reseedWorkerPrompt()              // worker:标准卡与类型锚定(一次性)
-	s.reseedPentestPrompt()             // pentest:目录驱动独立挖掘(一次性)
+	s.reseedGoalsPrompt()               // goals:可验收交付目标(一次性)
+	s.reseedMainAgentPrompt()           // mainagent:有证据的方向调整(一次性)
+	s.reseedAutoPrompt()                // auto:任务级交接与结果核对(一次性)
+	s.reseedPlannerPrompt()             // planner:高价值假设与证据推进(一次性)
+	s.reseedWorkerPrompt()              // worker:基线、对照、危害与交接(一次性)
+	s.reseedPentestPrompt()             // pentest:证据驱动的有界独立挖掘(一次性)
 	s.seedReporterAgent()               // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
 	s.upgradeReporterTriggerMessage()   // 老库补迁移:让 reporter 回传 evidence_version(一次性)
 	s.upgradeReporterTriggerMessageV2() // 老库补迁移:触发消息补报告骨架提醒(一次性)
@@ -649,29 +650,33 @@ func (s *Server) reseedPromptToDefault(agentKey, flag, tmpl, doneNote string) {
 	log.Printf("[prompts] %s 提示词已追加新默认版本(%s,一次性)", agentKey, doneNote)
 }
 
-// reseedGoalsPrompt 对齐类型目录中 collect: yes 的目标清单；默认再变时 bump flag。
+// reseedGoalsPrompt 对齐可验收交付目标，避免类型配额和永久目标。
 func (s *Server) reseedGoalsPrompt() {
-	s.reseedPromptToDefault("goals", "goals_prompt_src_mining_v4", agent.BuiltinPromptSeeds()["goals"], "目标类型对齐可收目录")
+	s.reseedPromptToDefault("goals", "goals_prompt_src_mining_v5", agent.BuiltinPromptSeeds()["goals"], "可验收交付目标")
 }
 
 // reseedMainAgentPrompt 对齐人工直投意图的类型、证明物与覆盖态势约束。
 func (s *Server) reseedMainAgentPrompt() {
-	s.reseedPromptToDefault("mainagent", "mainagent_prompt_src_mining_v3", agent.BuiltinPromptSeeds()["mainagent"], "直投意图对齐类型目录")
+	s.reseedPromptToDefault("mainagent", "mainagent_prompt_src_mining_v4", agent.BuiltinPromptSeeds()["mainagent"], "有证据的方向调整")
+}
+
+func (s *Server) reseedAutoPrompt() {
+	s.reseedPromptToDefault("auto", "auto_prompt_src_mining_v1", agent.BuiltinPromptSeeds()["auto"], "任务交接与结果核对")
 }
 
 // reseedPlannerPrompt 对齐类型化意图、标准卡与 type_coverage 规划反馈。
 func (s *Server) reseedPlannerPrompt() {
-	s.reseedPromptToDefault("planner", "planner_prompt_src_mining_v7", agent.BuiltinPromptSeeds()["planner"], "高价值路线与有界研究")
+	s.reseedPromptToDefault("planner", "planner_prompt_src_mining_v8", agent.BuiltinPromptSeeds()["planner"], "高价值假设与证据推进")
 }
 
 // reseedWorkerPrompt 对齐本类标准卡、证明物止损与意图类型锚定。
 func (s *Server) reseedWorkerPrompt() {
-	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v9", agent.BuiltinPromptSeeds()["worker"], "高价值路线与有界研究")
+	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v10", agent.BuiltinPromptSeeds()["worker"], "基线、对照、危害与交接")
 }
 
 // reseedPentestPrompt 对齐独立挖掘的可收类型目录与证明物、止损线。
 func (s *Server) reseedPentestPrompt() {
-	s.reseedPromptToDefault("pentest", "pentest_prompt_src_mining_v3", agent.BuiltinPromptSeeds()["pentest"], "独立挖掘对齐类型目录")
+	s.reseedPromptToDefault("pentest", "pentest_prompt_src_mining_v4", agent.BuiltinPromptSeeds()["pentest"], "证据驱动的有界独立挖掘")
 }
 
 // reporterToolCallMessage 必须无条件要求先读一次 get_finding_traffic 再写报告。
@@ -757,12 +762,9 @@ func (s *Server) upgradeReporterTriggerMessageV2() {
 	}
 }
 
-// reseedReporterPrompt 把 reporter 提示词刷成【当前代码默认】——默认正文按 SRC 提交稿
-// 标准重写(首屏判决/原始报文 PoC/证据密度/去 AI 腔)，v2 又做了报告瘦身：描述 ≤200 字、
-// 删「自写叙述行数≤引用原文行数」反向激励、危害节禁重复复现报文、PoC 改 Step 式、
-// 测试账号节加凭据相关性规则(复现不依赖登录态就整节省略)。以后默认再变就 bump flag。
+// reseedReporterPrompt 对齐证据来源、影响边界与报告版本核对。
 func (s *Server) reseedReporterPrompt() {
-	s.reseedPromptToDefault("reporter", "reporter_prompt_concise_v2", agent.ReporterDefaultPrompt, "报告瘦身:描述≤200字+凭据相关性+危害禁重复复现")
+	s.reseedPromptToDefault("reporter", "reporter_prompt_concise_v3", agent.ReporterDefaultPrompt, "证据对账与可复现交付")
 }
 
 // seedReporterAgent 预置一个「报告撰写」自定义 agent(builtin=false，可在 UI 编辑/删除)：

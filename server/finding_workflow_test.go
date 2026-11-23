@@ -185,8 +185,11 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	workflowCall(t, ctx, s.toolGetFindingTraffic(), map[string]any{"finding_id": recorded.FindingID}, false)
 	tools, def, closeTools := agent.AugmentTools(ctx, "planner", ts.PlannerTools())
 	defer closeTools()
-	if def.FindingGuidance != "" {
-		t.Fatal("disabled feature still injects guidance")
+	if strings.Contains(def.FindingGuidance, "**流量证据交接") || strings.Contains(def.FindingGuidance, "**报告前自动关联流量") {
+		t.Fatal("disabled binding feature still injects binding guidance")
+	}
+	if !strings.Contains(def.FindingGuidance, "SRC 漏洞收取标准") || !strings.Contains(def.FindingGuidance, "~~~types") {
+		t.Fatal("disabling binding removed independent SRC standards")
 	}
 	for _, tool := range tools {
 		if tool.Name() == "bind_finding_traffic" {
