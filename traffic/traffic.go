@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -965,6 +966,8 @@ type BodyAvailability string
 const (
 	BodyPresent BodyAvailability = "present"
 	BodyMissing BodyAvailability = "missing"
+	BodyPartial BodyAvailability = "partial"
+	BodyUnknown BodyAvailability = "unknown"
 	BodyLegacy  BodyAvailability = "legacy_tree"
 )
 
@@ -978,6 +981,9 @@ type BodyPart struct {
 	Blob         string
 	Total        int64
 	Availability BodyAvailability
+	Warning      string
+	// BlobMissing marks a spilled body whose blob file can no longer be opened.
+	BlobMissing bool
 }
 
 // rawText renders head, blank line, inline bytes and the blob pointer. The
@@ -1013,8 +1019,17 @@ func (t *Traffic) GetParts(id string) (req, resp BodyPart, err error) {
 FROM exchange_bodies b JOIN exchanges e ON e.id=b.id WHERE b.id=?`, id).
 		Scan(&reqHead, &reqBody, &reqMissing, &reqBlob, &respHead, &respBody, &respMissing, &respBlob, &reqLen, &respLen)
 	if err == nil {
-		req = newBodyPart(reqHead, reqMissing, reqBody, reqBlob, int64(reqLen))
-		resp = newBodyPart(respHead, respMissing, respBody, respBlob, int64(respLen))
+		req = t.newBodyPart(reqHead, reqMissing, reqBody, reqBlob, int64(reqLen))
+		resp = t.newBodyPart(respHead, respMissing, respBody, respBlob, int64(respLen))
+		if strings.HasPrefix(id, "browser-") {
+			const browserWarning = "浏览器导入：未由 ARTEX 复测，身份头或响应正文可能省略；不能以缺失正文判断目标响应。"
+			req.Warning, resp.Warning = browserWarning, browserWarning
+			// Historical browser imports did not persist the omitted flag, so an
+			// empty stored body cannot prove an empty response was observed.
+			if resp.Availability == BodyPresent && resp.Total == 0 {
+				resp.Availability = BodyUnknown
+			}
+		}
 		return req, resp, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -1028,26 +1043,45 @@ FROM exchange_bodies b JOIN exchanges e ON e.id=b.id WHERE b.id=?`, id).
 	if strings.TrimSpace(rel) == "" {
 		return req, resp, fmt.Errorf("exchange %s 无正文记录", id)
 	}
-	rb, _ := os.ReadFile(filepath.Join(t.dir, rel, "request.http"))
-	pb, _ := os.ReadFile(filepath.Join(t.dir, rel, "response.http"))
-	return BodyPart{Data: rb, Total: int64(len(rb)), Availability: BodyLegacy},
-		BodyPart{Data: pb, Total: int64(len(pb)), Availability: BodyLegacy}, nil
+	return legacyBodyPart(filepath.Join(t.dir, rel, "request.http")),
+		legacyBodyPart(filepath.Join(t.dir, rel, "response.http")), nil
 }
 
-func newBodyPart(head string, nullBody bool, body []byte, blob sql.NullString, total int64) BodyPart {
+// legacyBodyPart reads one side of a pre-SQLite exchange. A missing or unreadable
+// file is reported as missing rather than as an observed empty body.
+func legacyBodyPart(path string) BodyPart {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return BodyPart{Availability: BodyMissing, Warning: "历史流量文件缺失或不可读：" + err.Error()}
+	}
+	return BodyPart{Data: data, Total: int64(len(data)), Availability: BodyLegacy}
+}
+
+func (t *Traffic) newBodyPart(head string, nullBody bool, body []byte, blob sql.NullString, total int64) BodyPart {
 	p := BodyPart{Head: head, Data: body, Availability: BodyPresent}
 	if blob.Valid {
 		p.Blob = blob.String
 	}
+	// The recorded length is authoritative: it exceeds the inline bytes when the
+	// body spilled, and reveals a partial capture when the blob write failed.
+	if total < int64(len(body)) {
+		total = int64(len(body))
+	}
+	p.Total = total
 	if nullBody {
 		p.Data, p.Availability = nil, BodyMissing
 	}
-	// A spilled body stores only a preview inline; the column's length is not the
-	// body's length. Keep the recorded total so paging can report the real size.
 	if p.Blob != "" {
-		p.Total = total
-	} else {
-		p.Total = int64(len(body))
+		if f, _, err := t.Blob(p.Blob); err != nil {
+			p.BlobMissing = true
+			p.Availability = BodyPartial
+			p.Warning = "记录的正文 blob 缺失，只能看到内联预览：共 " + strconv.FormatInt(total, 10) + " 字节"
+		} else {
+			_ = f.Close()
+		}
+	} else if total > int64(len(body)) {
+		p.Availability = BodyPartial
+		p.Warning = "正文只保存了前 " + strconv.Itoa(len(body)) + " 字节，其余未落盘"
 	}
 	return p
 }
@@ -1082,10 +1116,14 @@ func (t *Traffic) ReadPart(p BodyPart, offset, length int64) (data []byte, remai
 	if offset > p.Total {
 		return nil, 0, fmt.Errorf("offset 超出正文长度（总长 %d 字节）", p.Total)
 	}
-	if p.Blob != "" {
+	if p.Blob != "" && !p.BlobMissing {
 		return t.blobRangeAt(p, offset, length)
 	}
+	// Inline bytes (preview, or the only surviving copy when the blob is gone).
 	end := min(offset+length, int64(len(p.Data)))
+	if offset >= int64(len(p.Data)) {
+		return nil, 0, nil
+	}
 	return p.Data[offset:end], p.Total - end, nil
 }
 
@@ -2165,15 +2203,17 @@ func (t *Traffic) Tools() []actool.CoreTool {
 
 	get := actool.Build(actool.Spec{
 		Name:        "traffic_get",
-		Description: "按 id 取一条已抓流量的请求/响应原文。默认返回精简预览（请求 2500、响应 4000 字符）；预览被截断时会保留 '@blob sha256:<hash>' 指针和偏移提示。要看预览之外的正文：内联正文用 side+offset+length 分页读取；超大正文按 @blob 指针交给 traffic_blob。meta_only 只返回正文长度、可用性与哈希（不含正文），用于确认是否真有内容。缺失/省略的正文会明确标注，不能当作目标返回空响应。",
+		Description: "按 id 取一条已抓流量的请求/响应原文。默认返回精简预览（请求 2500、响应 4000 字符）；预览被截断时会保留 '@blob sha256:<hash>' 指针和偏移提示。要看预览之外的正文：内联正文用 side+offset+length 分页读取；超大正文按 @blob 指针交给 traffic_blob。meta_only 只返回正文长度、可用性与哈希（不含正文），用于确认是否真有内容。缺失/省略/只有部分捕获的正文会明确标注，不能当作目标返回空响应。无损读取用 side+encoding=base64，返回 data、offset、next_offset、total、remaining、truncated，偏移按原始字节计；未指定编码时，二进制或跨 UTF-8 边界的页也返回 base64 JSON，避免丢字节。header_only=true 可读取完整请求/响应头。",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"id":        map[string]any{"type": "string", "description": "traffic_search 返回的 id"},
-				"side":      map[string]any{"type": "string", "description": "分页读取哪一侧：request 或 response；省略则返回两侧预览"},
-				"offset":    map[string]any{"type": "integer", "description": "分页起始字节偏移（原始字节，默认 0）"},
-				"length":    map[string]any{"type": "integer", "description": "本次读取字节数，默认且最大 8192"},
-				"meta_only": map[string]any{"type": "boolean", "description": "只返回正文元数据 JSON（长度、可用性、blob 哈希），不返回正文"},
+				"id":          map[string]any{"type": "string", "description": "traffic_search 返回的 id"},
+				"side":        map[string]any{"type": "string", "description": "分页读取哪一侧：request 或 response；省略则返回两侧预览"},
+				"offset":      map[string]any{"type": "integer", "description": "分页起始字节偏移（原始字节，默认 0）"},
+				"length":      map[string]any{"type": "integer", "description": "本次读取字节数，默认且最大 8192"},
+				"meta_only":   map[string]any{"type": "boolean", "description": "只返回正文元数据 JSON（长度、可用性、blob 哈希），不返回正文"},
+				"encoding":    map[string]any{"type": "string", "enum": []any{"base64"}, "description": "配合 side 返回无损字节分页 JSON；data 为 base64，offset/next_offset/total 按原始字节计"},
+				"header_only": map[string]any{"type": "boolean", "description": "配合 side 返回该侧完整头部（不裁剪），用于读取超过预览上限的头部"},
 			},
 			"required": []any{"id"},
 		},
@@ -2181,25 +2221,33 @@ func (t *Traffic) Tools() []actool.CoreTool {
 		Permissions: allow,
 		Run: func(_ context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
 			var a struct {
-				ID       string
-				Side     string
-				Offset   int64
-				Length   int64
-				MetaOnly bool `json:"meta_only"`
+				ID         string
+				Side       string
+				Offset     int64
+				Length     int64
+				MetaOnly   bool `json:"meta_only"`
+				Encoding   string
+				HeaderOnly bool `json:"header_only"`
 			}
 			_ = json.Unmarshal(in, &a)
+			if a.Encoding != "" && (a.Encoding != "base64" || a.Side == "") {
+				return actool.Errorf("encoding 仅支持 base64 且必须指定 side"), nil
+			}
 			req, resp, err := t.GetParts(a.ID)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
-			}
-			note := ""
-			if strings.HasPrefix(a.ID, "browser-") {
-				note = "[浏览器导入：未由 ARTEX 复测，身份头或响应正文可能省略；不能以缺失正文判断目标响应。]\n"
 			}
 			if a.Side != "" {
 				p, err := t.bodyPart(a.ID, a.Side)
 				if err != nil {
 					return actool.Errorf(err.Error()), nil
+				}
+				note := ""
+				if p.Warning != "" {
+					note = "[" + p.Warning + "]\n"
+				}
+				if a.HeaderOnly {
+					return actool.Text(note + p.Head), nil
 				}
 				if a.MetaOnly {
 					return jsonResult(partMeta(a.Side, p))
@@ -2208,18 +2256,22 @@ func (t *Traffic) Tools() []actool.CoreTool {
 				if err != nil {
 					return actool.Errorf(err.Error()), nil
 				}
-				if len(data) == 0 {
-					return actool.Text(fmt.Sprintf("[%s offset=%d 本次=0 总长=%d] 已到正文末尾。", a.Side, a.Offset, p.Total)), nil
+				if a.Encoding == "base64" || isBinaryBody("", data) || !utf8.Valid(data) {
+					page := partMeta(a.Side, p)
+					page["encoding"], page["data"] = "base64", base64.StdEncoding.EncodeToString(data)
+					page["offset"], page["next_offset"] = a.Offset, a.Offset+int64(len(data))
+					page["truncated"], page["remaining"] = remaining > 0, remaining
+					return jsonResult(page)
 				}
-				head := fmt.Sprintf("[%s offset=%d 本次=%d 总长=%d 剩余=%d", a.Side, a.Offset, len(data), p.Total, remaining)
+				if len(data) == 0 {
+					return actool.Text(note + fmt.Sprintf("[%s availability=%s offset=%d 本次=0 总长=%d] 已到已存正文末尾。", a.Side, p.Availability, a.Offset, p.Total)), nil
+				}
+				head := fmt.Sprintf("[%s availability=%s offset=%d 本次=%d 总长=%d 剩余=%d", a.Side, p.Availability, a.Offset, len(data), p.Total, remaining)
 				if p.Blob != "" {
 					head += " 超大正文继续用 traffic_blob(hash=" + p.Blob + ")"
 				}
 				head += "]\n"
-				if isBinaryBody("", data) {
-					return actool.Text(head + "二进制内容，以十六进制展示前 512 字节：\n" + hex.EncodeToString(clipBytes(data, 512))), nil
-				}
-				return actool.Text(head + string(bytes.ToValidUTF8(data, []byte("�")))), nil
+				return actool.Text(note + head + string(data)), nil
 			}
 			if a.MetaOnly {
 				return jsonResult(map[string]any{
@@ -2228,8 +2280,8 @@ func (t *Traffic) Tools() []actool.CoreTool {
 					"response": partMeta("response", resp),
 				})
 			}
-			return actool.Text(note + "=== REQUEST ===\n" + clipKeepPointer(req.rawText(), 2500) +
-				"\n\n=== RESPONSE ===\n" + clipKeepPointer(resp.rawText(), 4000)), nil
+			return actool.Text(noteFor(req) + "=== REQUEST ===\n" + clipKeepPointer(req, 2500) +
+				"\n\n=== RESPONSE ===\n" + noteFor(resp) + clipKeepPointer(resp, 4000)), nil
 		},
 	})
 
@@ -2287,20 +2339,25 @@ func clip(s string, max int) string {
 	return s[:max] + fmt.Sprintf("\n... [截断，共 %d 字节；完整在流量文件树] ...", len(s))
 }
 
-// clipKeepPointer clips a preview but keeps a trailing "@blob sha256:<hash>"
-// pointer visible, so a reader always learns that the rest can be paged.
-func clipKeepPointer(s string, max int) string {
+// clipKeepPointer derives continuation hints only from storage metadata, never
+// from pointer-like text supplied in an HTTP body.
+func clipKeepPointer(p BodyPart, max int) string {
+	s := p.rawText()
 	if len(s) <= max {
 		return s
 	}
-	if i := strings.LastIndex(s, "@blob sha256:"); i > 0 && i > max {
-		tail := s[i:]
-		if nl := strings.IndexByte(tail, '\n'); nl >= 0 {
-			tail = tail[:nl]
-		}
-		return s[:max] + fmt.Sprintf("\n... [截断，共 %d 字节；继续读取见 %s] ...", len(s), tail)
+	if p.Blob != "" {
+		return s[:max] + fmt.Sprintf("\n... [截断，共 %d 字节；继续读取见 @blob sha256:%s (len=%d)] ...", len(s), p.Blob, p.Total)
 	}
 	return clip(s, max)
+}
+
+// noteFor surfaces a body's availability warning above its preview.
+func noteFor(p BodyPart) string {
+	if p.Warning == "" {
+		return ""
+	}
+	return "[" + p.Warning + "]\n"
 }
 
 func jsonResult(v any) (actool.Result, error) {
@@ -2322,6 +2379,13 @@ func partMeta(side string, p BodyPart) map[string]any {
 	}
 	if p.Blob != "" {
 		out["blob_sha256"] = p.Blob
+	}
+	// partial still exposes its stored preview; missing has nothing to read.
+	if p.Availability == BodyMissing {
+		out["readable"] = false
+	}
+	if p.Warning != "" {
+		out["warning"] = p.Warning
 	}
 	return out
 }

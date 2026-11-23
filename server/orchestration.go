@@ -536,13 +536,14 @@ func (s *Server) seedOrchestrationTools() {
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
 }
 
-// refreshTrafficGetSchema propagates the paging-capable traffic_get schema to
-// already-seeded rows once. SeedTool is first-insert-only, so an old DB would
-// otherwise never learn about side/offset/length/meta_only. Binding and enabled
-// flag are preserved, and a custom description stays unless it is the built-in
-// one — the same contract as refreshBuiltinToolSchemas.
+// refreshTrafficGetSchema adds the paging properties an old traffic_get row is
+// missing, in place. SeedTool is first-insert-only, so an old DB would never see
+// side/offset/length/meta_only/encoding otherwise. Only absent properties are
+// inserted: user-added constraints, descriptions, required lists, bindings and
+// the enabled flag stay exactly as edited. The v2 flag also reaches databases
+// that already ran the earlier all-or-nothing v1 migration.
 func (s *Server) refreshTrafficGetSchema() {
-	const flag = "traffic_get_paging_v1"
+	const flag = "traffic_get_paging_v2"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -550,18 +551,27 @@ func (s *Server) refreshTrafficGetSchema() {
 		if t.Name() != "traffic_get" {
 			continue
 		}
-		schema, _ := json.Marshal(t.InputSchema())
+		schema, err := json.Marshal(t.InputSchema())
+		if err != nil {
+			return
+		}
 		row, err := s.m.pg.GetTool("traffic_get")
-		if err != nil || row == nil {
+		if err != nil || row == nil || !row.System {
 			return
 		}
-		desc := row.Description
-		if desc == "" || desc == trafficGetLegacyDescription {
-			desc = t.Description()
+		for _, property := range []string{"side", "offset", "length", "meta_only", "encoding", "header_only"} {
+			path := "$.properties." + property
+			if _, err := s.m.pg.Exec(`UPDATE tools SET schema=json_insert(schema,$1,json_extract($2,$1)),updated_at=now()
+WHERE key='traffic_get' AND system AND json_type(schema,$1) IS NULL`, path, string(schema)); err != nil {
+				log.Printf("[traffic] add traffic_get property %s: %v", property, err)
+				return
+			}
 		}
-		if err := s.m.pg.RefreshToolDefaults("traffic_get", desc, schema); err != nil {
-			log.Printf("[traffic] refresh traffic_get schema: %v", err)
-			return
+		if row.Description == "" || row.Description == trafficGetLegacyDescription {
+			if _, err := s.m.pg.Exec(`UPDATE tools SET description=$1,updated_at=now() WHERE key='traffic_get' AND system AND description=$2`, t.Description(), row.Description); err != nil {
+				log.Printf("[traffic] refresh traffic_get description: %v", err)
+				return
+			}
 		}
 		_ = s.m.pg.SetSetting(flag, "true")
 		return

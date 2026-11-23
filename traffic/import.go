@@ -93,7 +93,13 @@ func (t *Traffic) ImportBrowser(ex BrowserExchange) (string, error) {
 		return id, nil
 	}
 	rowid, _ := res.LastInsertId()
-	if _, err = tx.Exec(`INSERT INTO exchange_bodies(id,req_head,req_body,resp_head,resp_body) VALUES(?,?,?,?,?)`, id, reqHead, []byte(ex.Body), respHead, []byte(ex.ResponseBody)); err != nil {
+	// An omitted response body is unknown, not an observed empty response: store
+	// SQL NULL so readers can distinguish it from a real zero-length body.
+	var responseBody any = []byte(ex.ResponseBody)
+	if ex.ResponseBodyOmitted {
+		responseBody = nil
+	}
+	if _, err = tx.Exec(`INSERT INTO exchange_bodies(id,req_head,req_body,resp_head,resp_body) VALUES(?,?,?,?,?)`, id, reqHead, []byte(ex.Body), respHead, responseBody); err != nil {
 		return "", err
 	}
 	if t.fts {

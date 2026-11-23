@@ -199,14 +199,14 @@ func TestTrafficGetSchemaUpgradePreservesBindingAndCustomization(t *testing.T) {
 	t.Cleanup(func() {
 		bindings, _ := json.Marshal(old.Agents)
 		_ = pg.UpdateTool(old.Key, old.Description, old.Schema, bindings, old.Enabled)
-		_ = pg.SetSetting("traffic_get_paging_v1", "false")
+		_ = pg.SetSetting("traffic_get_paging_v2", "false")
 	})
 
 	// An old DB: legacy description + schema without the paging params.
 	if err := pg.UpdateTool("traffic_get", trafficGetLegacyDescription, json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`), json.RawMessage(`["worker","reporter"]`), false); err != nil {
 		t.Fatal(err)
 	}
-	_ = pg.SetSetting("traffic_get_paging_v1", "false")
+	_ = pg.SetSetting("traffic_get_paging_v2", "false")
 	s.refreshTrafficGetSchema()
 	tool, err := pg.GetTool("traffic_get")
 	if err != nil || tool == nil {
@@ -230,16 +230,46 @@ func TestTrafficGetSchemaUpgradePreservesBindingAndCustomization(t *testing.T) {
 		t.Fatalf("升级改动了用户绑定/启用状态: %+v", tool)
 	}
 
-	// A user-edited description is kept on later runs.
-	customSchema := json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`)
+	// A user-edited description and hand-tuned schema survive the upgrade: only
+	// absent properties are added, never existing constraints or required lists.
+	customSchema := json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"id":{"type":"string","pattern":"^fixture-","description":"custom ID"},"length":{"type":"integer","maximum":128},"custom":{"type":"boolean"}},"required":["id","custom"]}`)
 	if err := pg.UpdateTool("traffic_get", "我的自定义说明", customSchema, json.RawMessage(`["worker"]`), true); err != nil {
 		t.Fatal(err)
 	}
-	_ = pg.SetSetting("traffic_get_paging_v1", "false")
+	_ = pg.SetSetting("traffic_get_paging_v2", "false")
 	s.refreshTrafficGetSchema()
 	tool, _ = pg.GetTool("traffic_get")
 	if tool.Description != "我的自定义说明" || !tool.Enabled || len(tool.Agents) != 1 {
 		t.Fatalf("自定义配置被覆盖: %+v", tool)
+	}
+	var custom struct {
+		Properties           map[string]json.RawMessage `json:"properties"`
+		Required             []string                   `json:"required"`
+		AdditionalProperties bool                       `json:"additionalProperties"`
+	}
+	if err := json.Unmarshal(tool.Schema, &custom); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"side", "offset", "meta_only", "encoding", "header_only"} {
+		if len(custom.Properties[key]) == 0 {
+			t.Fatalf("升级后缺少参数 %s: %s", key, tool.Schema)
+		}
+	}
+	if !strings.Contains(string(custom.Properties["id"]), "^fixture-") || !strings.Contains(string(custom.Properties["length"]), "128") ||
+		len(custom.Properties["custom"]) == 0 || strings.Join(custom.Required, ",") != "id,custom" || custom.AdditionalProperties {
+		t.Fatalf("自定义 schema 被覆盖: %s", tool.Schema)
+	}
+
+	// The v2 flag also upgrades a database that already ran the old v1 migration.
+	_ = pg.SetSetting("traffic_get_paging_v1", "true")
+	_ = pg.SetSetting("traffic_get_paging_v2", "false")
+	if err := pg.UpdateTool("traffic_get", "我的自定义说明", customSchema, json.RawMessage(`["worker"]`), true); err != nil {
+		t.Fatal(err)
+	}
+	s.refreshTrafficGetSchema()
+	again, _ := pg.GetTool("traffic_get")
+	if !strings.Contains(string(again.Schema), `"encoding"`) || again.Description != "我的自定义说明" {
+		t.Fatalf("v1 已执行过的库未获得新参数: %s", again.Schema)
 	}
 }
 

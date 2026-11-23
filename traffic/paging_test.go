@@ -3,8 +3,10 @@ package traffic
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
-	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -37,6 +39,24 @@ func toolText(t *testing.T, tr *Traffic, name string, in map[string]any) string 
 	return ""
 }
 
+// trafficToolFails reports whether the tool surfaced an error result.
+func trafficToolFails(t *testing.T, tr *Traffic, name string, in map[string]any) bool {
+	t.Helper()
+	for _, tool := range tr.Tools() {
+		if tool.Name() != name {
+			continue
+		}
+		raw, err := json.Marshal(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := tool.Call(context.Background(), raw, nil)
+		return err != nil || res.IsError
+	}
+	t.Fatalf("tool %s not found", name)
+	return false
+}
+
 // A body past the inline threshold loses its blob pointer today: traffic_get
 // clips the assembled text, and the pointer sits after the preview. The worker
 // then cannot tell that more content exists at all.
@@ -60,10 +80,27 @@ func TestTrafficGetKeepsBlobPointerAndPages(t *testing.T) {
 		t.Fatalf("traffic_get 丢失了 blob 指针，worker 无法继续取回：\n%s", clip(out, 600))
 	}
 
-	// Paging by the pointer must restore the exact tail without re-requesting.
 	got := toolText(t, tr, "traffic_blob", map[string]any{"hash": hash, "offset": len(big) - len(tail), "length": 64})
 	if !strings.Contains(got, strings.TrimSpace(tail)) {
 		t.Fatalf("traffic_blob 未取回预览之外的内容：\n%s", clip(got, 300))
+	}
+}
+
+// Pointer-like text inside a captured body must never become a continuation
+// hint: only real storage metadata may do that.
+func TestTrafficGetDoesNotPromoteInlineBlobPointer(t *testing.T) {
+	tr, _ := openTraffic(t)
+	fake := "@blob sha256:" + strings.Repeat("a", 64)
+	body := strings.Repeat("A", 5000) + fake + "\n"
+	tr.record(newFlow("inline.example.com", "GET", "/fake-pointer", nil, []byte(body)))
+	id := onlyExchangeID(t, tr)
+	preview := toolText(t, tr, "traffic_get", map[string]any{"id": id})
+	if strings.Contains(preview, fake) {
+		t.Fatalf("正文中的假指针被提升为存储提示：%s", clip(preview, 300))
+	}
+	page := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "offset": 5000})
+	if !strings.Contains(page, fake) {
+		t.Fatal("正文中的假指针应保持为可读取的原文")
 	}
 }
 
@@ -84,11 +121,10 @@ func TestTrafficGetPagesInlineBodies(t *testing.T) {
 	if !strings.Contains(page, "MARKER-TAIL") {
 		t.Fatalf("分页未取回预览之后的正文：\n%s", clip(page, 300))
 	}
-	if !strings.Contains(page, "[response offset=5000") || !strings.Contains(page, "总长=") || !strings.Contains(page, "剩余=") {
+	if !strings.Contains(page, "总长=") || !strings.Contains(page, "剩余=") {
 		t.Fatalf("分页结果缺少偏移/总长元数据：\n%s", clip(page, 300))
 	}
 
-	// Page metadata must survive clipping independent of the body text.
 	meta := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "meta_only": true})
 	var info struct {
 		Total      int64  `json:"total"`
@@ -126,8 +162,140 @@ func TestTrafficGetMetaDistinguishesMissingAndEmptyBody(t *testing.T) {
 	if err := json.Unmarshal([]byte(meta), &info); err != nil {
 		t.Fatal(err)
 	}
-	if info.Availability == "present" {
-		t.Fatalf("缺失正文不应报告为 present：%+v", info)
+	if info.Availability != "missing" {
+		t.Fatalf("缺失正文应标为 missing：%+v", info)
+	}
+	if !trafficToolFails(t, tr, "traffic_get", map[string]any{"id": id, "side": "response"}) {
+		t.Fatal("缺失正文不能读成空正文")
+	}
+}
+
+// An omitted browser response body is unknown, and historical imports cannot
+// prove an empty response was observed.
+func TestTrafficGetBrowserBodyAvailability(t *testing.T) {
+	tr, _ := openTraffic(t)
+	id, err := tr.ImportBrowser(BrowserExchange{URL: "https://browser.example.com/", Method: "GET", Status: 200, ResponseBodyOmitted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "meta_only": true})
+	var info struct {
+		Availability string `json:"availability"`
+		Warning      string `json:"warning"`
+	}
+	if err := json.Unmarshal([]byte(meta), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Availability != "missing" || !strings.Contains(info.Warning, "浏览器导入") {
+		t.Fatalf("省略正文的错误可用性: %s", meta)
+	}
+	if !trafficToolFails(t, tr, "traffic_get", map[string]any{"id": id, "side": "response"}) {
+		t.Fatal("省略正文不应读取为空")
+	}
+
+	// Historical row: response_body stored as an empty blob by the old importer.
+	id2, err := tr.ImportBrowser(BrowserExchange{URL: "https://browser.example.com/hist", Method: "GET", Status: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta = toolText(t, tr, "traffic_get", map[string]any{"id": id2, "side": "response", "meta_only": true})
+	if err := json.Unmarshal([]byte(meta), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Availability != "unknown" || !strings.Contains(info.Warning, "浏览器导入") {
+		t.Fatalf("历史空正文应标为 unknown 并保留警告: %s", meta)
+	}
+}
+
+// A body with a recorded length longer than its stored bytes was only partially
+// captured, and a spilled body whose blob vanished is not fully readable.
+func TestTrafficGetReportsPartialAndMissingBlob(t *testing.T) {
+	tr, _ := openTraffic(t)
+	if !tr.fts {
+		t.Skip("驱动未启用 FTS5")
+	}
+	big := []byte(strings.Repeat("x", maxInlineBody+5000))
+	tr.record(newFlow("partial.example.com", "GET", "/partial", nil, big))
+	id := onlyExchangeID(t, tr)
+	var hash string
+	if err := tr.DB().QueryRow(`SELECT resp_blob FROM exchange_bodies WHERE id=?`, id).Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(tr.dir, "_blobs", "sha256", hash[:2], hash+".bin")); err != nil {
+		t.Fatal(err)
+	}
+	meta := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "meta_only": true})
+	var info struct {
+		Availability string `json:"availability"`
+		Warning      string `json:"warning"`
+		Total        int64  `json:"total"`
+	}
+	if err := json.Unmarshal([]byte(meta), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Availability != "partial" || info.Total != int64(len(big)) || info.Warning == "" {
+		t.Fatalf("缺失 blob 应标为 partial 并保留记录长度: %s", meta)
+	}
+	// The surviving preview is still readable; paging past it is not claimed.
+	page := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "offset": 0, "length": 100})
+	if !strings.Contains(page, "xxxx") {
+		t.Fatalf("部分捕获的内联预览应可读: %s", clip(page, 200))
+	}
+}
+
+// Long headers need their own complete read path: the default preview clips
+// them, and body paging does not return them.
+func TestTrafficGetReadsFullHeaders(t *testing.T) {
+	tr, _ := openTraffic(t)
+	longHead := "GET / HTTP/1.1\r\nX-Long: " + strings.Repeat("h", 5000) + "\r\n"
+	tr.record(newFlow("headers.example.com", "GET", "/h", nil, []byte("ok")))
+	id := onlyExchangeID(t, tr)
+	if _, err := tr.DB().Exec(`UPDATE exchange_bodies SET req_head=? WHERE id=?`, longHead, id); err != nil {
+		t.Fatal(err)
+	}
+	preview := toolText(t, tr, "traffic_get", map[string]any{"id": id})
+	if strings.Count(preview, "h") > 2500 {
+		t.Fatal("默认预览应裁剪超长头部")
+	}
+	full := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": "request", "header_only": true})
+	if !strings.Contains(full, strings.Repeat("h", 5000)) {
+		t.Fatalf("header_only 未返回完整头部: %d bytes", len(full))
+	}
+}
+
+// Without an encoding, a chunk that splits a multi-byte rune must not be
+// replaced: it is returned as base64 so paging restores exact bytes.
+func TestTrafficGetBase64RestoresStoredBytes(t *testing.T) {
+	tr, _ := openTraffic(t)
+	body := append(bytes.Repeat([]byte("中文🙂"), 1000), 0, 255)
+	tr.record(newFlow("bytes.example.com", "POST", "/bytes", body, body))
+	id := onlyExchangeID(t, tr)
+	for _, side := range []string{"request", "response"} {
+		var joined []byte
+		for offset := 0; offset < len(body); {
+			out := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": side, "offset": offset, "length": 8191})
+			var page struct {
+				Data       string `json:"data"`
+				Encoding   string `json:"encoding"`
+				NextOffset int    `json:"next_offset"`
+				Total      int    `json:"total"`
+			}
+			if err := json.Unmarshal([]byte(out), &page); err != nil {
+				t.Fatalf("跨页多字节正文应返回无损 JSON，而非替换字符: %v", err)
+			}
+			data, err := base64.StdEncoding.DecodeString(page.Data)
+			if err != nil || page.Encoding != "base64" || page.NextOffset != offset+len(data) || len(data) == 0 || page.Total != len(body) {
+				t.Fatalf("错误的字节页: %+v, %v", page, err)
+			}
+			joined = append(joined, data...)
+			offset = page.NextOffset
+		}
+		if !bytes.Equal(joined, body) {
+			t.Fatalf("%s 未还原原始字节", side)
+		}
+	}
+	if !trafficToolFails(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "encoding": "unknown"}) {
+		t.Fatal("未知编码应拒绝")
 	}
 }
 
@@ -138,22 +306,8 @@ func TestTrafficGetPageValidation(t *testing.T) {
 	id := onlyExchangeID(t, tr)
 
 	first := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "offset": 0, "length": 100000})
-	if !strings.Contains(first, fmt.Sprintf("本次=%d", maxBlobRead)) {
+	if !strings.Contains(first, "本次=8192") {
 		t.Fatalf("单页读取未被上限约束：\n%s", clip(first, 200))
-	}
-	// Offsets are original bytes: two adjacent 8KB pages reassemble the body.
-	var joined []byte
-	for offset := 0; offset < len(body); {
-		page := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "offset": offset})
-		start := strings.IndexByte(page, '\n')
-		if start < 0 {
-			t.Fatalf("分页结果缺少正文：%q", page)
-		}
-		joined = append(joined, page[start+1:]...)
-		offset += maxBlobRead
-	}
-	if !bytes.Equal(joined, body) {
-		t.Fatalf("逐页读取未能还原正文：got %d bytes", len(joined))
 	}
 	for name, in := range map[string]map[string]any{
 		"负偏移":   {"id": id, "side": "response", "offset": -5},
@@ -163,22 +317,4 @@ func TestTrafficGetPageValidation(t *testing.T) {
 			t.Fatalf("%s 应返回错误", name)
 		}
 	}
-}
-
-// trafficToolFails reports whether the tool surfaced an error result.
-func trafficToolFails(t *testing.T, tr *Traffic, name string, in map[string]any) bool {
-	t.Helper()
-	for _, tool := range tr.Tools() {
-		if tool.Name() != name {
-			continue
-		}
-		raw, err := json.Marshal(in)
-		if err != nil {
-			t.Fatal(err)
-		}
-		res, err := tool.Call(context.Background(), raw, nil)
-		return err != nil || res.IsError
-	}
-	t.Fatalf("tool %s not found", name)
-	return false
 }
