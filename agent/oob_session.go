@@ -79,19 +79,48 @@ type liveSession struct {
 	it     interactor
 	mu     sync.Mutex
 	buf    []OOBInteraction
+	seen   map[string]struct{}
 	closed bool
 	health func() (int64, error, time.Time, time.Time)
+}
+
+// pollSource is the subset of *oob.Session the live pump needs; tests inject
+// controlled fakes here so dedup/lifecycle behavior is verifiable offline.
+type pollSource interface {
+	urlClient
+	StartPolling(interval time.Duration, cb func(oob.Interaction)) error
+	Health() (int64, error, time.Time, time.Time)
 }
 
 // newLiveSession wires a real *oob.Session into the seam and starts the
 // polling pump. Caller owns shutdown via Close (StopPolling → Close).
 func newLiveSession(s *oob.Session, pollInterval time.Duration) (*liveSession, error) {
-	ls := &liveSession{it: interactor{client: s}}
 	if s == nil {
 		return nil, fmt.Errorf("oob: 会话未初始化")
 	}
-	err := s.StartPolling(pollInterval, func(in oob.Interaction) {
+	return newLiveSessionFrom(s, s, pollInterval)
+}
+
+// newLiveSessionFrom builds a live session from any pollSource (real client or
+// test double). Interactions are deduplicated by event identity (protocol +
+// full callback ID + timestamp + remote) — Interactsh may redeliver an event,
+// and the same event must never be attributed twice to a probe or task.
+func newLiveSessionFrom(mint urlClient, src pollSource, pollInterval time.Duration) (*liveSession, error) {
+	if src == nil || mint == nil {
+		return nil, fmt.Errorf("oob: 会话未初始化")
+	}
+	ls := &liveSession{it: interactor{client: mint}}
+	err := src.StartPolling(pollInterval, func(in oob.Interaction) {
+		key := interactionKey(in)
 		ls.mu.Lock()
+		if ls.seen == nil {
+			ls.seen = make(map[string]struct{})
+		}
+		if _, dup := ls.seen[key]; dup {
+			ls.mu.Unlock()
+			return
+		}
+		ls.seen[key] = struct{}{}
 		ls.buf = append(ls.buf, OOBInteraction{
 			Protocol:     in.Protocol,
 			UniqueID:     probeIDForInteraction(in.FullID, in.Raw),
@@ -105,11 +134,22 @@ func newLiveSession(s *oob.Session, pollInterval time.Duration) (*liveSession, e
 	if err != nil {
 		return nil, err
 	}
-	ls.health = s.Health
+	ls.health = src.Health
 	return ls, nil
 }
 
-func (ls *liveSession) Generate() (string, string, error) { return ls.it.Generate() }
+// interactionKey identifies one callback event across redeliveries. Timestamp
+// is included so two genuinely distinct callbacks with the same ID are kept.
+func interactionKey(in oob.Interaction) string {
+	return strings.Join([]string{in.Protocol, in.FullID, in.Remote, in.Timestamp.UTC().Format(time.RFC3339Nano)}, "|")
+}
+
+func (ls *liveSession) Generate() (string, string, error) {
+	if ls.isClosed() {
+		return "", "", fmt.Errorf("oob: 会话已关闭，请让本次 run 分配新的回调地址")
+	}
+	return ls.it.Generate()
+}
 
 // probeIDForInteraction maps an interaction back to the first DNS label issued
 // by Generate. Interactsh's UniqueID is the session correlation ID, not a

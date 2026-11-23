@@ -15,5 +15,11 @@
     "mcp_cooldown_seconds": 60,
     "route_cap": 6,
     "recipe_dir": ""
+  },
+  "_comment_oob": "带外验证（Interactsh）。不带 oob 块 = 默认启用公共服务（官方 oast 域）。注意：公共服务的运营方可以看到回调元数据与 payload 内容——涉及敏感目标请自建。自建时填 HTTPS 地址（或裸主机名），可带 token；地址为空或明文 http:// 会明确报错，不会静默回退公共服务。会话私钥只留在进程内存，不写库不落盘。",
+  "oob": {
+    "enabled": true,
+    "server_url": "",
+    "token": ""
   }
 }

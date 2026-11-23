@@ -130,6 +130,9 @@ func (t *ToolSet) oobPoll(s oobSession) actool.CoreTool {
 					"status":       outcome,
 					"error":        err.Error(),
 				}
+				if outcome == "service_unavailable" {
+					out["hint"] = "OOB 服务当前不可用，不影响其他验证；如需稳定带外验证可在 config.json 的 oob 块配置自建 Interactsh 服务（server_url + token），或稍后重试。"
+				}
 				if id, saveErr := t.recordOOBOutcome(outcome, summary, "", err.Error()); saveErr == nil && id > 0 {
 					out["fact_id"] = id
 				}
