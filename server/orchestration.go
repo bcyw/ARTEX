@@ -13,6 +13,7 @@ import (
 	"github.com/bcyw/artex/config"
 	"github.com/bcyw/artex/db"
 	"github.com/bcyw/artex/internal/recipes"
+	"github.com/bcyw/artex/traffic"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -508,6 +509,7 @@ func (s *Server) seedOrchestrationTools() {
 	}
 	s.refreshBuiltinToolSchemas()
 	s.seedRouteGuidanceToolSchema()
+	s.refreshTrafficGetSchema()
 	s.seedAutoDefaultBindings()
 	s.seedPlannerDefaultBindings()
 	s.seedPlannerListAssetsBinding()
@@ -533,6 +535,42 @@ func (s *Server) seedOrchestrationTools() {
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
 }
+
+// refreshTrafficGetSchema propagates the paging-capable traffic_get schema to
+// already-seeded rows once. SeedTool is first-insert-only, so an old DB would
+// otherwise never learn about side/offset/length/meta_only. Binding and enabled
+// flag are preserved, and a custom description stays unless it is the built-in
+// one — the same contract as refreshBuiltinToolSchemas.
+func (s *Server) refreshTrafficGetSchema() {
+	const flag = "traffic_get_paging_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	for _, t := range traffic.SeedToolMetas() {
+		if t.Name() != "traffic_get" {
+			continue
+		}
+		schema, _ := json.Marshal(t.InputSchema())
+		row, err := s.m.pg.GetTool("traffic_get")
+		if err != nil || row == nil {
+			return
+		}
+		desc := row.Description
+		if desc == "" || desc == trafficGetLegacyDescription {
+			desc = t.Description()
+		}
+		if err := s.m.pg.RefreshToolDefaults("traffic_get", desc, schema); err != nil {
+			log.Printf("[traffic] refresh traffic_get schema: %v", err)
+			return
+		}
+		_ = s.m.pg.SetSetting(flag, "true")
+		return
+	}
+}
+
+// trafficGetLegacyDescription is the description older releases seeded; only an
+// unmodified one is replaced, so operator edits survive the upgrade.
+const trafficGetLegacyDescription = "按 id 取一条已抓流量的请求/响应原文（过大会截断）。配合 traffic_search 用，避免重复 curl。"
 
 // Only insert the newly introduced optional fields. Existing schema edits,
 // descriptions, enabled flags and bindings remain owned by the user.

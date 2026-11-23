@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -67,13 +68,178 @@ func trafficEvidenceServer(t *testing.T) (*Server, *db.RecordedFinding, func(str
 
 func seedServerEvidenceFlow(t *testing.T, s *Server, id string, body []byte) {
 	t.Helper()
-	_, err := s.m.traffic.DB().Exec(`INSERT INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path) VALUES(?,1,'evidence.local','POST','/','http://evidence.local/',200,'application/octet-stream',0,?,'')`, id, len(body))
+	seedServerEvidenceBodies(t, s, id, []byte{}, body)
+}
+
+func seedServerEvidenceBodies(t *testing.T, s *Server, id string, request, response []byte) {
+	t.Helper()
+	_, err := s.m.traffic.DB().Exec(`INSERT INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path) VALUES(?,1,'evidence.local','POST','/','http://evidence.local/',200,'application/octet-stream',?,?,'')`, id, len(request), len(response))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.m.traffic.DB().Exec(`INSERT INTO exchange_bodies(id,req_head,resp_head,req_body,resp_body) VALUES(?,'POST / HTTP/1.1','HTTP/1.1 200 OK',?,?)`, id, []byte{}, body)
+	_, err = s.m.traffic.DB().Exec(`INSERT INTO exchange_bodies(id,req_head,resp_head,req_body,resp_body) VALUES(?,'POST / HTTP/1.1','HTTP/1.1 200 OK',?,?)`, id, request, response)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFindingTrafficBodyBase64RestoresBothSides(t *testing.T) {
+	s, f, request := trafficEvidenceServer(t)
+	reqBody := []byte("abc中\x00\xff")
+	respBody := []byte("xyz🙂\x00\x80end")
+	seedServerEvidenceBodies(t, s, "both-sides", reqBody, respBody)
+	list, err := s.evidenceStore().Bind(t.Context(), f.FindingID, []db.TrafficRef{{TrafficID: "both-sides"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.m.traffic.DeleteHost("evidence.local"); err != nil {
+		t.Fatal(err)
+	}
+	path := fmt.Sprintf("/api/exploration/findings/%d/traffic/%d/body?encoding=base64", f.FindingID, list.Bindings[0].ID)
+	for _, tc := range []struct {
+		side string
+		body []byte
+		hash string
+	}{
+		{"request", reqBody, list.Bindings[0].Snapshot.ReqHash},
+		{"response", respBody, list.Bindings[0].Snapshot.RespHash},
+	} {
+		t.Run(tc.side, func(t *testing.T) {
+			const length = 4 // The first page ends inside a UTF-8 character on each side.
+			wantHash := fmt.Sprintf("%x", sha256.Sum256(tc.body))
+			var joined []byte
+			for offset := 0; offset < len(tc.body); {
+				w := request("GET", fmt.Sprintf("%s&side=%s&offset=%d&length=%d", path, tc.side, offset, length), "")
+				if w.Code != 200 {
+					t.Fatal(w.Code, w.Body)
+				}
+				var page struct {
+					Encoding   string `json:"encoding"`
+					Content    []byte `json:"content"` // JSON decodes standard base64 strings into []byte.
+					SHA256     string `json:"sha256"`
+					Total      int    `json:"total"`
+					Offset     int    `json:"offset"`
+					NextOffset int    `json:"next_offset"`
+					Truncated  *bool  `json:"truncated"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+					t.Fatal(err, w.Body)
+				}
+				end := min(offset+length, len(tc.body))
+				if page.Encoding != "base64" || page.SHA256 != tc.hash || page.SHA256 != wantHash || page.Total != len(tc.body) ||
+					page.Offset != offset || page.NextOffset != end || page.Truncated == nil || *page.Truncated != (end < len(tc.body)) {
+					t.Fatalf("unexpected page: %s", w.Body)
+				}
+				joined = append(joined, page.Content...)
+				offset = page.NextOffset
+			}
+			if !bytes.Equal(joined, tc.body) {
+				t.Fatalf("joined bytes = %x; want %x", joined, tc.body)
+			}
+		})
+	}
+}
+
+func TestFindingTrafficBodyBase64EdgesAndLegacyPreview(t *testing.T) {
+	s, f, request := trafficEvidenceServer(t)
+	seedServerEvidenceBodies(t, s, "edges", []byte("req"), []byte{})
+	list, err := s.evidenceStore().Bind(t.Context(), f.FindingID, []db.TrafficRef{{TrafficID: "edges"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := fmt.Sprintf("/api/exploration/findings/%d/traffic/%d/body", f.FindingID, list.Bindings[0].ID)
+
+	w := request("GET", path+"?encoding=base64&side=response", "")
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	var page struct {
+		Content   []byte `json:"content"`
+		Total     int    `json:"total"`
+		Next      int64  `json:"next_offset"`
+		Truncated bool   `json:"truncated"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatal(err, w.Body)
+	}
+	if len(page.Content) != 0 || page.Total != 0 || page.Next != 0 || page.Truncated {
+		t.Fatalf("empty body page = %s", w.Body)
+	}
+
+	if w = request("GET", path+"?encoding=hex", ""); w.Code != 400 {
+		t.Fatal("unknown encoding must be rejected", w.Code, w.Body)
+	}
+	if w = request("GET", path+"?encoding=base64&offset=-1", ""); w.Code == 200 {
+		t.Fatal("negative offset must fail", w.Body)
+	}
+	if w = request("GET", path+"?encoding=base64&offset=99&side=response", ""); w.Code == 200 {
+		t.Fatal("offset past end must fail", w.Body)
+	}
+
+	w = request("GET", path+"?side=response", "")
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	var preview evidencePreview
+	if err := json.Unmarshal(w.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err, w.Body)
+	}
+	if preview.Total != 0 || preview.Content != "" || preview.Truncated {
+		t.Fatalf("legacy preview changed for empty body: %s", w.Body)
+	}
+}
+
+func TestTrafficGetSchemaUpgradePreservesBindingAndCustomization(t *testing.T) {
+	s, _, _ := trafficEvidenceServer(t)
+	pg := s.m.pg
+	old, err := pg.GetTool("traffic_get")
+	if err != nil || old == nil {
+		t.Fatal("missing traffic_get", err)
+	}
+	t.Cleanup(func() {
+		bindings, _ := json.Marshal(old.Agents)
+		_ = pg.UpdateTool(old.Key, old.Description, old.Schema, bindings, old.Enabled)
+		_ = pg.SetSetting("traffic_get_paging_v1", "false")
+	})
+
+	// An old DB: legacy description + schema without the paging params.
+	if err := pg.UpdateTool("traffic_get", trafficGetLegacyDescription, json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`), json.RawMessage(`["worker","reporter"]`), false); err != nil {
+		t.Fatal(err)
+	}
+	_ = pg.SetSetting("traffic_get_paging_v1", "false")
+	s.refreshTrafficGetSchema()
+	tool, err := pg.GetTool("traffic_get")
+	if err != nil || tool == nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.Schema, &schema); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"side", "offset", "length", "meta_only"} {
+		if len(schema.Properties[p]) == 0 {
+			t.Fatalf("升级后缺少参数 %s: %s", p, tool.Schema)
+		}
+	}
+	if tool.Description == trafficGetLegacyDescription || !strings.Contains(tool.Description, "分页") {
+		t.Fatalf("内置描述未升级: %q", tool.Description)
+	}
+	if tool.Enabled || len(tool.Agents) != 2 {
+		t.Fatalf("升级改动了用户绑定/启用状态: %+v", tool)
+	}
+
+	// A user-edited description is kept on later runs.
+	customSchema := json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`)
+	if err := pg.UpdateTool("traffic_get", "我的自定义说明", customSchema, json.RawMessage(`["worker"]`), true); err != nil {
+		t.Fatal(err)
+	}
+	_ = pg.SetSetting("traffic_get_paging_v1", "false")
+	s.refreshTrafficGetSchema()
+	tool, _ = pg.GetTool("traffic_get")
+	if tool.Description != "我的自定义说明" || !tool.Enabled || len(tool.Agents) != 1 {
+		t.Fatalf("自定义配置被覆盖: %+v", tool)
 	}
 }
 
