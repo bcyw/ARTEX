@@ -130,8 +130,13 @@ func (t *ToolSet) oobPoll(s oobSession) actool.CoreTool {
 					"status":       outcome,
 					"error":        err.Error(),
 				}
-				if outcome == "service_unavailable" {
+				switch {
+				case errors.Is(err, errSessionClosed):
+					out["hint"] = "本次 OOB 会话已关闭（run 结束或重启失效），观察窗口未完成；继续验证请用 oob_generate 重新分配回调地址。"
+				case outcome == "service_unavailable":
 					out["hint"] = "OOB 服务当前不可用，不影响其他验证；如需稳定带外验证可在 config.json 的 oob 块配置自建 Interactsh 服务（server_url + token），或稍后重试。"
+				case outcome == "observation_incomplete":
+					out["hint"] = "观察窗口内没有完成一次轮询，常由 OOB 服务故障引起；可稍后重试，或配置自建 Interactsh 服务（config.json 的 oob 块）。"
 				}
 				if id, saveErr := t.recordOOBOutcome(outcome, summary, "", err.Error()); saveErr == nil && id > 0 {
 					out["fact_id"] = id

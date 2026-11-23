@@ -36,7 +36,6 @@ type deliverFake struct {
 	interactions []oob.Interaction
 	dedup        int
 	delay        time.Duration
-	delivered    int
 }
 
 func (f *deliverFake) URL() string  { return f.url }
@@ -126,6 +125,55 @@ func TestSessionsAreIsolatedPerFactoryCall(t *testing.T) {
 	id2, host2, _ := s2.Generate()
 	if id1 == id2 || host1 == host2 {
 		t.Fatalf("不同 run 的会话应产出不同探测地址: %s vs %s", host1, host2)
+	}
+}
+
+func TestConcurrentLiveSessionsIsolateEvents(t *testing.T) {
+	// 并发 worker：多个 liveSession 各自投递事件并同时 Poll；
+	// 同一事件去重，不同会话的事件互不串（-race 下验证）。
+	mk := func(n string) *liveSession {
+		f := &deliverFake{
+			url: n + ".oast.pro",
+			interactions: []oob.Interaction{
+				{Protocol: "dns", FullID: "p1." + n + ".oast.pro", Raw: "A? p1." + n + ".oast.pro", Remote: "192.0.2.1", Timestamp: time.Unix(100, 0).UTC()},
+				{Protocol: "dns", FullID: "p2." + n + ".oast.pro", Raw: "A? p2." + n + ".oast.pro", Remote: "192.0.2.2", Timestamp: time.Unix(200, 0).UTC()},
+			},
+			dedup: 2,
+		}
+		t.Cleanup(func() { _ = f.Close() })
+		ls, err := newLiveSessionFrom(f, f, 10*time.Millisecond)
+		if err != nil {
+			t.Fatalf("newLiveSessionFrom: %v", err)
+		}
+		return ls
+	}
+	const workers = 4
+	var wg sync.WaitGroup
+	got := make([][]OOBInteraction, workers)
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			ls := mk("run" + string(rune('a'+w)))
+			defer func() { _ = ls.Close() }()
+			its, err := ls.Poll(2 * time.Second)
+			if err != nil {
+				t.Errorf("worker %d Poll: %v", w, err)
+				return
+			}
+			got[w] = its
+		}(w)
+	}
+	wg.Wait()
+	for w, its := range got {
+		if len(its) != 2 {
+			t.Fatalf("worker %d 应只收到本会话 2 条去重后事件，got %d: %+v", w, len(its), its)
+		}
+		for _, it := range its {
+			if !strings.Contains(it.FullID, "run"+string(rune('a'+w))+".") {
+				t.Fatalf("worker %d 收到其他会话的事件: %+v", w, it)
+			}
+		}
 	}
 }
 

@@ -109,13 +109,10 @@ func newLiveSessionFrom(mint urlClient, src pollSource, pollInterval time.Durati
 	if src == nil || mint == nil {
 		return nil, fmt.Errorf("oob: 会话未初始化")
 	}
-	ls := &liveSession{it: interactor{client: mint}}
+	ls := &liveSession{it: interactor{client: mint}, seen: make(map[string]struct{})}
 	err := src.StartPolling(pollInterval, func(in oob.Interaction) {
 		key := interactionKey(in)
 		ls.mu.Lock()
-		if ls.seen == nil {
-			ls.seen = make(map[string]struct{})
-		}
 		if _, dup := ls.seen[key]; dup {
 			ls.mu.Unlock()
 			return
