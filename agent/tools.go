@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bcyw/artex/db"
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/bcyw/artex/db"
 )
 
 // compactIntents distills intents to {id, summary, state, asset_ids, parents,
@@ -1684,9 +1684,27 @@ type factItem struct {
 	Outcome    string            `json:"outcome,omitempty"`
 }
 
-// recordOneFact 写一条 fact 节点并连到意图（intent→yields→fact）。defaultIntent 为
-// 批量时的默认意图（本条未给 intent_id 时用）。
-func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error) {
+// factIntentID distinguishes an omitted intent_id from an invalid explicit value.
+func factIntentID(raw json.RawMessage) (int64, error) {
+	if len(raw) == 0 {
+		return 0, nil
+	}
+	var id int64
+	err := json.Unmarshal(raw, &id)
+	if err != nil {
+		var text string
+		if err = json.Unmarshal(raw, &text); err == nil {
+			id, err = strconv.ParseInt(strings.TrimSpace(text), 10, 64)
+		}
+	}
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("intent_id 必须是正整数（或其字符串）；无归属时请省略")
+	}
+	return id, nil
+}
+
+// recordOneFact 写一条事实节点；只有提供了归属意图才写 yields 关联。
+func (t *ToolSet) recordOneFact(it factItem) (int64, error) {
 	if strings.TrimSpace(it.Summary) == "" {
 		return 0, fmt.Errorf("summary 不能为空")
 	}
@@ -1706,23 +1724,34 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 	if o := strings.TrimSpace(it.Outcome); o != "" {
 		payload["outcome"] = o
 	}
-	intent := pid(it.IntentID)
-	if intent <= 0 {
-		intent = defaultIntent
-	}
-	if intent > 0 {
-		node, err := t.ts.GetNode(intent)
-		if err != nil || node == nil || node.Kind != db.KindIntent {
-			return 0, fmt.Errorf("intent_id 必须是本任务的意图（关联任务意图只读）")
-		}
-	}
-	// a fact is its OWN node kind (distinct from a vuln finding).
-	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.AssetIDs))
+	intent, err := factIntentID(it.IntentID)
 	if err != nil {
 		return 0, err
 	}
+	if intent > 0 && t.ownerNode > 0 && t.ownerNode != intent {
+		owner, err := t.ts.GetNode(t.ownerNode)
+		if err != nil {
+			return 0, err
+		}
+		// A missing owner may be a removed worker intent; fail closed.
+		if owner == nil {
+			return 0, fmt.Errorf("intent_id 无法校验：当前运行的归属节点不存在")
+		}
+		// A planner's origin fact is not a worker's assigned intent.
+		if owner.Kind == db.KindIntent {
+			return 0, fmt.Errorf("intent_id 必须是当前 worker 的意图")
+		}
+	}
+	// A fact is its own node kind (distinct from a vuln finding).
+	anchors := pidList(it.AssetIDs)
+	var id int64
 	if intent > 0 {
-		_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> fact
+		id, err = t.ts.AddFactForIntent(intent, payload, t.worker, anchors)
+	} else {
+		id, err = t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, anchors)
+	}
+	if err != nil {
+		return 0, err
 	}
 	t.writes.Facts++
 	return id, nil
@@ -1758,12 +1787,13 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 			if !batch {
 				items = []factItem{a.factItem}
 			}
-			defaultIntent := pid(a.factItem.IntentID) // 顶层 intent_id = 批量默认
-
 			ids := make([]int64, len(items))
 			errs := map[string]string{}
 			for i, it := range items {
-				id, err := t.recordOneFact(it, defaultIntent)
+				if batch && len(it.IntentID) == 0 {
+					it.IntentID = a.factItem.IntentID
+				}
+				id, err := t.recordOneFact(it)
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
 					continue

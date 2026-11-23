@@ -230,6 +230,14 @@ func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority
 		return 0, err
 	}
 	defer tx.Rollback()
+	id, err := s.addNodeTx(tx, kind, raw, priority, state, origin, anchors)
+	if err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
+}
+
+func (s *ExplorationStore) addNodeTx(tx *sql.Tx, kind string, raw []byte, priority int, state, origin string, anchors []int64) (int64, error) {
 	var id int64
 	if err := tx.QueryRow(`
 INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
@@ -242,7 +250,47 @@ VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
 			return 0, err
 		}
 	}
-	return id, tx.Commit()
+	return id, nil
+}
+
+// AddFactForIntent commits the fact, its asset anchors and its yields edge together.
+// The source intent must belong to this exploration, not an inherited task.
+func (s *ExplorationStore) AddFactForIntent(intentID int64, payload map[string]any, origin string, anchors []int64) (int64, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var local bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes WHERE id=$1 AND exploration_id=$2 AND kind=$3)`, intentID, s.expID, KindIntent).Scan(&local); err != nil {
+		return 0, err
+	}
+	if !local {
+		return 0, fmt.Errorf("intent_id 必须是本任务的意图（关联任务意图只读）")
+	}
+	id, err := s.addNodeTx(tx, KindFact, raw, 5, "confirmed", origin, anchors)
+	if err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`INSERT INTO exploration_edges(exploration_id, src_id, rel, dst_id) VALUES ($1,$2,$3,$4)`, s.expID, intentID, RelYields, id)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if n != 1 {
+		return 0, fmt.Errorf("未写入事实的 yields 关联")
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 // AddIntent is a convenience: an open intent.

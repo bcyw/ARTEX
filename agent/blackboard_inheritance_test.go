@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bcyw/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/bcyw/artex/db"
 )
 
 func callReadJSON(t *testing.T, tool actool.CoreTool, input string) any {
@@ -269,8 +269,7 @@ func TestBlackboardToolsReadDirectSources(t *testing.T) {
 		t.Fatalf("derived intent must be local: node=%+v err=%v", derived, err)
 	}
 	beforeFacts, _ := currentStore.ListByKind(db.KindFact, 100)
-	sourceIntentID, _ := json.Marshal(sourceIntent)
-	if _, err := tools.recordOneFact(factItem{Summary: "must not attach to inherited intent", IntentID: json.RawMessage(sourceIntentID)}, sourceIntent); err == nil {
+	if result := callRecordFact(t, tools.WorkerTools(), fmt.Sprintf(`{"summary":"must not attach to inherited intent","intent_id":%d}`, sourceIntent)); !result.IsError {
 		t.Fatal("record_fact must reject inherited intent")
 	}
 	afterFacts, _ := currentStore.ListByKind(db.KindFact, 100)
