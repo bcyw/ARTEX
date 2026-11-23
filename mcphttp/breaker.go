@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/artex/config"
+	"github.com/bcyw/artex/config"
 )
 
 var ErrCircuitOpen = errors.New("MCP server temporarily unavailable (circuit open); switch method or record the failure")

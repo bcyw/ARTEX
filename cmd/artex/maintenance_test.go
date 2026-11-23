@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/db"
 	"golang.org/x/crypto/bcrypt"
 	"os"
 	"path/filepath"

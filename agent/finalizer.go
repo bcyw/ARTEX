@@ -7,8 +7,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/internal/toolrun"
+	"github.com/bcyw/artex/db"
+	"github.com/bcyw/artex/internal/toolrun"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 )

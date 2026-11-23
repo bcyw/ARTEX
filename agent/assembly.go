@@ -8,7 +8,7 @@ import (
 	"runtime/debug"
 	"strings"
 
-	"github.com/Autumn-27/artex/internal/toolrun"
+	"github.com/bcyw/artex/internal/toolrun"
 
 	actool "github.com/Autumn-27/norma/tool"
 )

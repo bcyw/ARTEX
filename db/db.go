@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Autumn-27/artex/config"
+	"github.com/bcyw/artex/config"
 )
 
 //go:embed schema.sql

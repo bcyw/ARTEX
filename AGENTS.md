@@ -9,7 +9,7 @@ ARTEX is an LLM multi-agent pentest system: a Go backend embeds a Next.js static
 
 ## Context and boundaries
 
-- Keep Go imports under `github.com/Autumn-27/artex`; the maintained repository and hardcoded self-update source (`selfupdate/github.go`) are `bcyw/ARTEX`.
+- Keep Go imports under `github.com/bcyw/artex`; the maintained repository and hardcoded self-update source (`selfupdate/github.go`) are `bcyw/ARTEX`.
 - Before domain work, read `GLOSSARY.md` and relevant `docs/adr/` decisions; follow `docs/agents/domain.md` for terminology and ADR conflicts.
 - For specs/issues, use the local Markdown tracker in `.scratch/<feature>/`: read `docs/agents/issue-tracker.md`; for triage, read `docs/agents/triage-labels.md` (`Status:` lines, not GitHub labels).
 - `.scratch/` is gitignored. Under `docs/`, only `docs/agents/` and `docs/adr/` are unignored; older design references in code may be unavailable.

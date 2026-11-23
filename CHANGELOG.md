@@ -29,6 +29,10 @@
 
 ## [Unreleased]
 
+### 仓库标识
+
+- Go module 路径由 `github.com/Autumn-27/artex` 迁移至 `github.com/bcyw/artex`，全部 import、`go.mod` 与文档引用同步更新；外部依赖 `github.com/Autumn-27/norma` 不变。
+
 ### 更新源
 
 - 一键更新源由 `jaykwok/ARTEX` 改为本仓库 `bcyw/ARTEX`，页面更新检查、下载地址及文档中的仓库链接同步调整。

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
 )
 

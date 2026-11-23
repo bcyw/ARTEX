@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/db"
 )
 
 func TestHighValueRoutePromptAssembly(t *testing.T) {

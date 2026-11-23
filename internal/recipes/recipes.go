@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/artex/config"
-	"github.com/Autumn-27/artex/internal/toolrun"
+	"github.com/bcyw/artex/config"
+	"github.com/bcyw/artex/internal/toolrun"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 	"gopkg.in/yaml.v3"

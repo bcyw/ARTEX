@@ -1,8 +1,8 @@
 package server
 
 import (
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/traffic"
+	"github.com/bcyw/artex/db"
+	"github.com/bcyw/artex/traffic"
 	"net/http"
 	"strconv"
 )

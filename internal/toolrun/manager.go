@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/artex/config"
+	"github.com/bcyw/artex/config"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 	"github.com/google/uuid"

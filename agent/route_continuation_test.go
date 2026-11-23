@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/db"
 )
 
 func TestRouteRejectsRewordedExecutionWithoutEvidence(t *testing.T) {

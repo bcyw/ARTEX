@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/db"
 )
 
 // addTypedFinding builds a complete fixture: an exploration finding node plus its

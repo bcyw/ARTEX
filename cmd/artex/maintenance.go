@@ -9,8 +9,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/Autumn-27/artex/config"
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/config"
+	"github.com/bcyw/artex/db"
 	"golang.org/x/crypto/bcrypt"
 )
 

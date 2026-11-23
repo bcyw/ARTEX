@@ -23,8 +23,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/artex/config"
-	"github.com/Autumn-27/artex/internal/tooloutput"
+	"github.com/bcyw/artex/config"
+	"github.com/bcyw/artex/internal/tooloutput"
 
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"

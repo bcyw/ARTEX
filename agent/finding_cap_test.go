@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/db"
 )
 
 // 同类上限闸（票 02：触顶拒收与引导）的入口级测试。

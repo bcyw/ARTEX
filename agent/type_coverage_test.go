@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/db"
 )
 
 // newTypeCoverageFixture returns a fresh task exploration plus a planner ToolSet

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/Autumn-27/artex/agent"
+	"github.com/bcyw/artex/agent"
 )
 
 func TestMiningStandardsRouteToolSchemaUpgrade(t *testing.T) {

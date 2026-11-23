@@ -13,7 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	pgdb "github.com/Autumn-27/artex/db"
+	pgdb "github.com/bcyw/artex/db"
 	"github.com/google/uuid"
 )
 

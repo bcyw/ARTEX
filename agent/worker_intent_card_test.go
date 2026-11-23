@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/db"
 )
 
 // intentNode 构造渲染用的意图节点（只填 renderIntentTask 消费的 ID/Payload）。

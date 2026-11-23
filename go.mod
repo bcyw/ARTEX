@@ -1,4 +1,4 @@
-module github.com/Autumn-27/artex
+module github.com/bcyw/artex
 
 go 1.27.4
 

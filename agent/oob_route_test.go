@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/db"
 )
 
 // 票据 01：route 可选字段接缝——add_intent / record_fact 接受结构化 route

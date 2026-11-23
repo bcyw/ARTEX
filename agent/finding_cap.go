@@ -3,7 +3,7 @@ package agent
 import (
 	"encoding/json"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/db"
 )
 
 // 同类上限闸（票 02）的计数实现：单任务内单一漏洞类型（折叠后规范桶）的

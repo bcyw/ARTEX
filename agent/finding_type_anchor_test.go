@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/db"
 )
 
 // 上报期类型归属（票 01：意图锚定 / 明确不收类型拒收 / 目录外放行）的入口级

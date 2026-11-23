@@ -1,7 +1,7 @@
 package agent
 
 import (
-	"github.com/Autumn-27/artex/internal/testdb"
+	"github.com/bcyw/artex/internal/testdb"
 	"os"
 	"testing"
 )

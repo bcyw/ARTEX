@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/internal/oob"
+	"github.com/bcyw/artex/internal/oob"
 )
 
 // 票据 04：OOB 去重、并发隔离、异常重启、秘密保护与不可用提示。

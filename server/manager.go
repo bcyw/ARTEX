@@ -14,12 +14,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
-	pgdb "github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/enrich"
-	"github.com/Autumn-27/artex/guard"
-	"github.com/Autumn-27/artex/intercept"
-	"github.com/Autumn-27/artex/traffic"
+	"github.com/bcyw/artex/agent"
+	pgdb "github.com/bcyw/artex/db"
+	"github.com/bcyw/artex/enrich"
+	"github.com/bcyw/artex/guard"
+	"github.com/bcyw/artex/intercept"
+	"github.com/bcyw/artex/traffic"
 	actool "github.com/Autumn-27/norma/tool"
 )
 

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
+	"github.com/bcyw/artex/agent"
 )
 
 func newTaskRevivalFixture(t *testing.T, status string, cached bool) (*Server, *Task) {

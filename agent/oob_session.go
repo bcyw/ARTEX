@@ -10,7 +10,7 @@ import (
 
 	actool "github.com/Autumn-27/norma/tool"
 
-	"github.com/Autumn-27/artex/internal/oob"
+	"github.com/bcyw/artex/internal/oob"
 )
 
 // 票据 01：internal/oob 会话到 oobSession 接缝的适配层。

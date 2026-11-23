@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/agent"
+	"github.com/bcyw/artex/agent"
 )
 
 // compliantFindingReport 是十节骨架的合规样例。结构来自实测合规报告(finding 2):

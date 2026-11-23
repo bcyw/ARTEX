@@ -14,7 +14,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/bcyw/artex/db"
 )
 
 const (
