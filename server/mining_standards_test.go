@@ -79,7 +79,7 @@ func TestMiningStandardsPromptReseed(t *testing.T) {
 		{"mainagent", "mainagent_prompt_src_mining_v4", s.reseedMainAgentPrompt},
 		{"auto", "auto_prompt_src_mining_v1", s.reseedAutoPrompt},
 		{"planner", "planner_prompt_src_mining_v8", s.reseedPlannerPrompt},
-		{"worker", "worker_prompt_src_mining_v10", s.reseedWorkerPrompt},
+		{"worker", "worker_prompt_src_mining_v11", s.reseedWorkerPrompt},
 		{"pentest", "pentest_prompt_src_mining_v4", s.reseedPentestPrompt},
 		{"reporter", "reporter_prompt_concise_v3", s.reseedReporterPrompt},
 		{"retester", "retester_prompt_src_acceptance_v2", s.reseedRetesterPrompt},

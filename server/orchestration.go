@@ -755,7 +755,7 @@ func (s *Server) reseedPlannerPrompt() {
 
 // reseedWorkerPrompt 对齐本类标准卡、证明物止损与意图类型锚定。
 func (s *Server) reseedWorkerPrompt() {
-	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v10", agent.BuiltinPromptSeeds()["worker"], "基线、对照、危害与交接")
+	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v11", agent.BuiltinPromptSeeds()["worker"], "基线、对照、危害与可恢复实验交接")
 }
 
 // reseedPentestPrompt 对齐独立挖掘的可收类型目录与证明物、止损线。
