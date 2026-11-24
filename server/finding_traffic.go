@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,10 +14,10 @@ import (
 	"strconv"
 	"unicode/utf8"
 
+	actool "github.com/Autumn-27/norma/tool"
 	"github.com/bcyw/artex/agent"
 	"github.com/bcyw/artex/db"
 	"github.com/bcyw/artex/evidence"
-	actool "github.com/Autumn-27/norma/tool"
 )
 
 func (s *Server) evidenceStore() *evidence.Store {
@@ -248,6 +249,30 @@ type evidencePreview struct {
 	Binary     bool   `json:"binary"`
 }
 
+func readEvidenceBodyRange(store *evidence.Store, snapshot db.TrafficEvidenceSnapshot, side string, offset, length int64) ([]byte, int64, error) {
+	if offset < 0 || length < 0 {
+		return nil, 0, errors.New("offset / length 不能为负数")
+	}
+	if length == 0 || length > 8192 {
+		length = 8192
+	}
+	f, total, err := store.OpenBody(snapshot, side)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+	if offset > total {
+		return nil, 0, errors.New("offset 超出正文长度")
+	}
+	raw := make([]byte, min(length, total-offset))
+	if len(raw) > 0 {
+		if _, err := io.ReadFull(io.NewSectionReader(f, offset, int64(len(raw))), raw); err != nil {
+			return nil, 0, err
+		}
+	}
+	return raw, total, nil
+}
+
 func readEvidencePreview(store *evidence.Store, snapshot db.TrafficEvidenceSnapshot, side string, offset, length int64) (out evidencePreview, err error) {
 	if offset < 0 || length < 0 {
 		return out, errors.New("offset / length 不能为负数")
@@ -366,6 +391,26 @@ func (s *Server) getFindingTrafficBody(w http.ResponseWriter, r *http.Request) {
 			}
 			*dst = v
 		}
+	}
+	encoding := r.URL.Query().Get("encoding")
+	if encoding != "" && encoding != "base64" {
+		writeErr(w, 400, "encoding 仅支持 base64")
+		return
+	}
+	if encoding == "base64" {
+		raw, total, err := readEvidenceBodyRange(store, b.Snapshot, side, offset, length)
+		if err != nil {
+			evidenceError(w, err)
+			return
+		}
+		hash := b.Snapshot.ReqHash
+		if side == "response" {
+			hash = b.Snapshot.RespHash
+		}
+		next := offset + int64(len(raw))
+		writeJSON(w, 200, map[string]any{"encoding": "base64", "content": base64.StdEncoding.EncodeToString(raw), "sha256": hash,
+			"offset": offset, "next_offset": next, "total": total, "truncated": next < total})
+		return
 	}
 	preview, err := readEvidencePreview(store, b.Snapshot, side, offset, length)
 	if err != nil {

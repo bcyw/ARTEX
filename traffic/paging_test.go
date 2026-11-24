@@ -241,6 +241,103 @@ func TestTrafficGetReportsPartialAndMissingBlob(t *testing.T) {
 	if !strings.Contains(page, "xxxx") {
 		t.Fatalf("部分捕获的内联预览应可读: %s", clip(page, 200))
 	}
+	// A missing spilled blob still leaves an inline preview, but paging beyond
+	// that surviving prefix must terminate instead of advertising unread bytes.
+	if !trafficToolFails(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "offset": maxInlineBody, "length": 100, "encoding": "base64"}) {
+		t.Fatal("缺失 blob 的不可读尾部应明确报错，不能返回无进展分页")
+	}
+}
+
+func TestTrafficGetMissingBinaryBlobDoesNotExposeTagAsBody(t *testing.T) {
+	tr, _ := openTraffic(t)
+	if !tr.fts {
+		t.Skip("驱动未启用 FTS5")
+	}
+	body := bytes.Repeat([]byte{0x00, 0xff, 0x01, 0x80}, maxInlineBody)
+	tr.record(newFlow("binary-missing.example.com", "GET", "/binary", nil, body, withRespType("application/octet-stream")))
+	id := onlyExchangeID(t, tr)
+	var hash string
+	if err := tr.DB().QueryRow(`SELECT resp_blob FROM exchange_bodies WHERE id=?`, id).Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(tr.dir, "_blobs", "sha256", hash[:2], hash+".bin")); err != nil {
+		t.Fatal(err)
+	}
+	meta := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "meta_only": true})
+	if !strings.Contains(meta, `"availability":"partial"`) || !strings.Contains(meta, `"total":`) {
+		t.Fatalf("缺失 blob 元数据不完整：%s", meta)
+	}
+	if !trafficToolFails(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "encoding": "base64", "offset": 0}) {
+		t.Fatal("binaryTag 不能作为遗失 binary 正文的原始字节返回")
+	}
+}
+
+func TestTrafficGetReadsLegacyBodiesWithoutExchangeBodyRow(t *testing.T) {
+	tr, dir := openTraffic(t)
+	rel := "legacy/1700000000-0001"
+	path := filepath.Join(dir, rel)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	request := []byte("POST /legacy HTTP/1.1\r\n\r\nbody")
+	response := append([]byte("HTTP/1.1 200 OK\r\n\r\n"), bytes.Repeat([]byte("旧"), 3000)...)
+	if err := os.WriteFile(filepath.Join(path, "request.http"), request, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "response.http"), response, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const id = "legacy-readable"
+	if _, err := tr.DB().Exec(`INSERT INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path) VALUES(?,1,'legacy.example.com','POST','/legacy','http://legacy/legacy',200,'text/plain',?,?,?)`, id, len(request), len(response), rel); err != nil {
+		t.Fatal(err)
+	}
+	var joined []byte
+	for offset := 0; offset < len(response); {
+		out := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "offset": offset, "length": 8191, "encoding": "base64"})
+		var page struct {
+			Data  string `json:"data"`
+			Next  int    `json:"next_offset"`
+			Total int    `json:"total"`
+		}
+		if err := json.Unmarshal([]byte(out), &page); err != nil {
+			t.Fatal(err, out)
+		}
+		data, err := base64.StdEncoding.DecodeString(page.Data)
+		if err != nil || len(data) == 0 || page.Next != offset+len(data) || page.Total != len(response) {
+			t.Fatalf("legacy page=%+v err=%v", page, err)
+		}
+		joined = append(joined, data...)
+		offset = page.Next
+	}
+	if !bytes.Equal(joined, response) {
+		t.Fatal("legacy response 分页未无损还原")
+	}
+}
+
+func TestTrafficGetReportsMissingLegacyBodies(t *testing.T) {
+	tr, dir := openTraffic(t)
+	rel := "legacy/missing"
+	if err := os.MkdirAll(filepath.Join(dir, rel), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const id = "legacy-missing"
+	if _, err := tr.DB().Exec(`INSERT INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path) VALUES(?,1,'legacy.example.com','GET','/missing','http://legacy/missing',200,'',10,20,?)`, id, rel); err != nil {
+		t.Fatal(err)
+	}
+	meta := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": "response", "meta_only": true})
+	var info struct {
+		Availability string `json:"availability"`
+		Warning      string `json:"warning"`
+	}
+	if err := json.Unmarshal([]byte(meta), &info); err != nil {
+		t.Fatal(err, meta)
+	}
+	if info.Availability != "missing" || info.Warning == "" {
+		t.Fatalf("legacy 缺失正文可用性错误: %s", meta)
+	}
+	if !trafficToolFails(t, tr, "traffic_get", map[string]any{"id": id, "side": "response"}) {
+		t.Fatal("缺失 legacy 正文不能读成空响应")
+	}
 }
 
 // Long headers need their own complete read path: the default preview clips

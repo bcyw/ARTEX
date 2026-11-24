@@ -1127,6 +1127,9 @@ func (t *Traffic) ReadPart(p BodyPart, offset, length int64) (data []byte, remai
 	if p.Availability == BodyMissing {
 		return nil, 0, fmt.Errorf("该侧正文未保存，不能以空正文判断目标响应")
 	}
+	if p.BlobMissing && strings.HasPrefix(string(p.Data), "[binary ") {
+		return nil, 0, fmt.Errorf("binary 正文 blob 缺失：内联内容仅为元数据标签，不是原始正文")
+	}
 	if offset > p.Total {
 		return nil, 0, fmt.Errorf("offset 超出正文长度（总长 %d 字节）", p.Total)
 	}
@@ -1136,6 +1139,9 @@ func (t *Traffic) ReadPart(p BodyPart, offset, length int64) (data []byte, remai
 	// Inline bytes (preview, or the only surviving copy when the blob is gone).
 	end := min(offset+length, int64(len(p.Data)))
 	if offset >= int64(len(p.Data)) {
+		if p.Total > int64(len(p.Data)) {
+			return nil, 0, fmt.Errorf("正文尾部不可读取：已保存 %d/%d 字节，不能继续分页", len(p.Data), p.Total)
+		}
 		return nil, 0, nil
 	}
 	return p.Data[offset:end], p.Total - end, nil

@@ -82,7 +82,9 @@ func TestExperimentHandoffSurvivesNextWorker(t *testing.T) {
 	if err != nil || len(factIDs) != 1 {
 		t.Fatalf("planned experiment fact did not survive reopen: %v %v", factIDs, err)
 	}
+	plannerReqStart := len(provider.reqs)
 	provider.add(toolTurn("facts", "list_facts", map[string]any{})...)
+	provider.add(toolTurn("detail", "node_detail", map[string]any{"id": factIDs[0]})...)
 	provider.add(toolTurn("i2", "add_intent", map[string]any{
 		"summary":    "read the delayed import job output",
 		"parent_ids": []int64{factIDs[0]},
@@ -90,6 +92,17 @@ func TestExperimentHandoffSurvivesNextWorker(t *testing.T) {
 	provider.add(textTurn("follow-up planned")...)
 	if _, _, err := planner.Plan(t.Context(), task.ID, nil, store, task.Goal, []TriggerEvent{{Kind: "worker_done", IntentID: intent.ID}}, nil); err != nil {
 		t.Fatalf("second planner round failed: %v", err)
+	}
+	plannerResults := toolResults(provider.reqs[plannerReqStart:])
+	for _, want := range []string{`"id":3`, "delayed trigger saved for later observation"} {
+		if !strings.Contains(plannerResults, want) {
+			t.Fatalf("planner list_facts result omitted %q: %s", want, plannerResults)
+		}
+	}
+	for _, want := range []string{"does the delayed import job run the supplied expression?", "POST /import with fixture document", "planned", "incomplete", "scheduled job output"} {
+		if !strings.Contains(plannerResults, want) {
+			t.Fatalf("planner node_detail result omitted %q: %s", want, plannerResults)
+		}
 	}
 	all, err := store.ListByKind(db.KindIntent, 10)
 	if err != nil || len(all) != 2 {
@@ -105,6 +118,7 @@ func TestExperimentHandoffSurvivesNextWorker(t *testing.T) {
 		t.Fatal("follow-up intent missing")
 	}
 
+	workerReqStart := len(provider.reqs)
 	provider.add(toolTurn("recover", "node_detail", map[string]any{"id": factIDs[0]})...)
 	provider.add(toolTurn("observe", "record_fact", map[string]any{
 		"summary": "delayed import observed executing the supplied expression",
@@ -121,21 +135,10 @@ func TestExperimentHandoffSurvivesNextWorker(t *testing.T) {
 	if _, _, err := second.Execute(t.Context(), "worker-2", task.ID, nil, store, followUp, nil, nil, nil, nil); err != nil {
 		t.Fatalf("second worker failed: %v", err)
 	}
-	var recovered string
-	for _, request := range provider.reqs {
-		for _, message := range request.Messages {
-			for _, block := range message.Content {
-				if block.Type == llm.BlockToolResult {
-					for _, content := range block.Content {
-						recovered += content.Text
-					}
-				}
-			}
-		}
-	}
+	recovered := toolResults(provider.reqs[workerReqStart:])
 	for _, want := range []string{"does the delayed import job run the supplied expression?", "POST /import with fixture document", "planned", "incomplete", "scheduled job output"} {
 		if !strings.Contains(recovered, want) {
-			t.Fatalf("second worker did not recover %q from the public fact tool: %s", want, recovered)
+			t.Fatalf("second worker did not recover %q from its public fact tool: %s", want, recovered)
 		}
 	}
 	observed, err := store.FactsYielded(followUp.ID)
@@ -157,6 +160,22 @@ func TestExperimentHandoffSurvivesNextWorker(t *testing.T) {
 	if experiment["reference_fact_id"].(float64) != float64(factIDs[0]) {
 		t.Fatalf("observation did not cite the saved fact: %+v", experiment)
 	}
+}
+
+func toolResults(requests []llm.CompletionRequest) string {
+	var results string
+	for _, request := range requests {
+		for _, message := range request.Messages {
+			for _, block := range message.Content {
+				if block.Type == llm.BlockToolResult {
+					for _, content := range block.Content {
+						results += content.Text
+					}
+				}
+			}
+		}
+	}
+	return results
 }
 
 // Capture off, a non-HTTP tool result, missing traffic material and an invalid
