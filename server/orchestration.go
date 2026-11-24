@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/norma/permission"
+	actool "github.com/Autumn-27/norma/tool"
 	"github.com/bcyw/artex/agent"
 	"github.com/bcyw/artex/config"
 	"github.com/bcyw/artex/db"
 	"github.com/bcyw/artex/internal/recipes"
 	"github.com/bcyw/artex/traffic"
-	"github.com/Autumn-27/norma/permission"
-	actool "github.com/Autumn-27/norma/tool"
 )
 
 // jsonResult marshals v to a JSON tool result.
@@ -510,6 +510,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.refreshBuiltinToolSchemas()
 	s.seedRouteGuidanceToolSchema()
 	s.refreshTrafficGetSchema()
+	s.refreshRecordFactExperimentSchema()
 	s.seedAutoDefaultBindings()
 	s.seedPlannerDefaultBindings()
 	s.seedPlannerListAssetsBinding()
@@ -581,6 +582,41 @@ WHERE key='traffic_get' AND system AND json_type(schema,$1) IS NULL`, path, stri
 // trafficGetLegacyDescription is the description older releases seeded; only an
 // unmodified one is replaced, so operator edits survive the upgrade.
 const trafficGetLegacyDescription = "按 id 取一条已抓流量的请求/响应原文（过大会截断）。配合 traffic_search 用，避免重复 curl。"
+
+// refreshRecordFactExperimentSchema adds the optional experiment/experiments
+// handoff properties to an already-seeded record_fact row. SeedTool is
+// first-insert only, so without this an upgraded database would never offer the
+// new fields. Only absent properties are inserted; the user's description,
+// constraints, required list, bindings and enabled flag stay as edited.
+func (s *Server) refreshRecordFactExperimentSchema() {
+	const flag = "record_fact_experiment_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	for _, seed := range agent.BuiltinToolSeeds() {
+		if seed.Key != "record_fact" {
+			continue
+		}
+		raw, err := json.Marshal(seed.Schema)
+		if err != nil {
+			return
+		}
+		row, err := s.m.pg.GetTool("record_fact")
+		if err != nil || row == nil || !row.System {
+			return
+		}
+		for _, property := range []string{"experiment", "experiments"} {
+			path := "$.properties." + property
+			if _, err := s.m.pg.Exec(`UPDATE tools SET schema=json_insert(schema,$1,json_extract($2,$1)),updated_at=now()
+WHERE key='record_fact' AND system AND json_type(schema,$1) IS NULL`, path, string(raw)); err != nil {
+				log.Printf("[tools] add record_fact property %s: %v", property, err)
+				return
+			}
+		}
+		_ = s.m.pg.SetSetting(flag, "true")
+		return
+	}
+}
 
 // Only insert the newly introduced optional fields. Existing schema edits,
 // descriptions, enabled flags and bindings remain owned by the user.
