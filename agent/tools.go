@@ -1682,6 +1682,16 @@ type factItem struct {
 	AssetIDs   []json.RawMessage `json:"asset_ids"`
 	Route      *Route            `json:"route,omitempty"` // 技术利用路线（可选）
 	Outcome    string            `json:"outcome,omitempty"`
+	Experiment json.RawMessage   `json:"experiment,omitempty"` // 可选的可恢复实验上下文
+}
+
+func validExperimentExecutionState(state string) bool {
+	switch state {
+	case "planned", "executed", "blocked", "unknown":
+		return true
+	default:
+		return false
+	}
 }
 
 // factIntentID distinguishes an omitted intent_id from an invalid explicit value.
@@ -1723,6 +1733,19 @@ func (t *ToolSet) recordOneFact(it factItem) (int64, error) {
 	}
 	if o := strings.TrimSpace(it.Outcome); o != "" {
 		payload["outcome"] = o
+	}
+	if len(it.Experiment) > 0 && string(it.Experiment) != "null" {
+		var experiment map[string]any
+		if err := json.Unmarshal(it.Experiment, &experiment); err != nil || experiment == nil {
+			return 0, fmt.Errorf("experiment 必须是对象")
+		}
+		if state, ok := experiment["execution_state"]; ok {
+			s, valid := state.(string)
+			if !valid || !validExperimentExecutionState(s) {
+				return 0, fmt.Errorf("experiment.execution_state 必须是 planned、executed、blocked 或 unknown")
+			}
+		}
+		payload["experiment"] = experiment
 	}
 	intent, err := factIntentID(it.IntentID)
 	if err != nil {
@@ -1774,7 +1797,7 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 		"  · confidence=observed（输出里直接看到）| inferred（据现象推断）。\n"+
 		"  · **否定类结论**（不可注入/端口关闭/未发现入口等）只写\"观察 + 试探性读法\"——陈述你实际看到什么，方向是否放弃由规划者综合全局定；务必给 evidence，手段没穷尽或证据弱（含只探一次、看起来像）标 inferred，确已穷尽且直接看到才标 observed。",
 		obj(map[string]any{
-			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids/route/outcome）；省略 intent_id 则用顶层 intent_id，顶层也省略则默认当前 worker 意图。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids/route/outcome/experiment）；省略 intent_id 则用顶层 intent_id，顶层也省略则默认当前 worker 意图。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
 			"intent_id":  idp("产生本事实的意图 id（你领到的意图；省略则默认当前 worker 意图，批量时作为各条默认）"),
 			"detail":     str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
@@ -1783,6 +1806,7 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产"},
 			"route":      routeSchema(),
 			"outcome":    map[string]any{"type": "string", "description": "本步路线结果（可选）：progress=有进展；negative=有效阴性；blocked=技术受阻；no_interaction=健康窗口暂无交互；service_unavailable=OOB 服务不可用；observation_incomplete=观察窗口未完成、无法判断；insufficient_impact=有交互但危害不足以成报；prerequisite_disproved=前置条件已证伪；variants_exhausted=关键变体已耗尽；impact=危害已证实。不要把所有失败折叠为 negative。"},
+			"experiment": map[string]any{"type": "object", "description": "可选的可恢复实验交接：question（待验证问题）、existing_evidence（已有证据）、normal_operation（正常操作基线）、identity（身份/业务状态）、variables（声明的变量）、actions（操作序列）、observation（观察位置/窗口/摘录/state）、execution_state（planned/executed/blocked/unknown）、conclusion、blocker、references（可追溯材料引用）。仅陈述实际可验证状态；模型自填引用不能证明材料存在，未知/未执行不得伪称已执行。"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
