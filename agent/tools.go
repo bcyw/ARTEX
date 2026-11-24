@@ -1694,6 +1694,62 @@ func validExperimentExecutionState(state string) bool {
 	}
 }
 
+func (t *ToolSet) validateExperimentReferences(experiment map[string]any) error {
+	refs, ok := experiment["references"].([]any)
+	if !ok {
+		return nil
+	}
+	for _, raw := range refs {
+		ref, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("experiment.references 必须是对象数组")
+		}
+		kind, _ := ref["kind"].(string)
+		verified := false
+		switch kind {
+		case "node":
+			value, ok := ref["id"].(float64)
+			if !ok || value <= 0 || value != math.Trunc(value) {
+				return fmt.Errorf("experiment reference id 无效")
+			}
+			node, err := t.ts.GetNodeWithSources(int64(value))
+			if err != nil {
+				return err
+			}
+			if node == nil {
+				return fmt.Errorf("experiment reference 不存在或不可用")
+			}
+			verified = true
+		case "activity":
+			value, ok := ref["id"].(float64)
+			if !ok || value <= 0 || value != math.Trunc(value) {
+				return fmt.Errorf("experiment reference id 无效")
+			}
+			activities, err := t.ts.ActivityByIDsWithSources([]int64{int64(value)})
+			if err != nil {
+				return err
+			}
+			if len(activities) == 0 {
+				return fmt.Errorf("experiment reference 不存在或不可用")
+			}
+			verified = true
+		case "traffic", "material":
+			id, ok := ref["id"].(string)
+			if !ok || strings.TrimSpace(id) == "" {
+				return fmt.Errorf("experiment reference id 无效")
+			}
+		default:
+			return fmt.Errorf("experiment reference kind 不支持")
+		}
+		// A caller cannot self-assert that a reference was verified. Graph and
+		// activity references are marked only after this store checked them;
+		// traffic/material references remain unverified until their owning host
+		// tool supplies a source-specific check.
+		ref["verified"] = verified
+	}
+	return nil
+}
+
 // factIntentID distinguishes an omitted intent_id from an invalid explicit value.
 func factIntentID(raw json.RawMessage) (int64, error) {
 	if len(raw) == 0 {
@@ -1744,6 +1800,9 @@ func (t *ToolSet) recordOneFact(it factItem) (int64, error) {
 			if !valid || !validExperimentExecutionState(s) {
 				return 0, fmt.Errorf("experiment.execution_state 必须是 planned、executed、blocked 或 unknown")
 			}
+		}
+		if err := t.validateExperimentReferences(experiment); err != nil {
+			return 0, err
 		}
 		payload["experiment"] = experiment
 	}
