@@ -1728,6 +1728,14 @@ func (t *ToolSet) recordOneFact(it factItem) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	// 省略 intent_id：worker 默认归属当前意图。ownerNode 只在 worker 语境下是
+	// 意图节点（planner 侧是任务起点 fact、main 侧为 0），故仅当其确为 KindIntent
+	// 时才默认绑定，否则维持无归属孤立 fact，遵循各调用方的原有职责。
+	if intent == 0 && t.ownerNode > 0 {
+		if owner, err := t.ts.GetNode(t.ownerNode); err == nil && owner != nil && owner.Kind == db.KindIntent {
+			intent = t.ownerNode
+		}
+	}
 	if intent > 0 && t.ownerNode > 0 && t.ownerNode != intent {
 		owner, err := t.ts.GetNode(t.ownerNode)
 		if err != nil {
@@ -1766,9 +1774,9 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 		"  · confidence=observed（输出里直接看到）| inferred（据现象推断）。\n"+
 		"  · **否定类结论**（不可注入/端口关闭/未发现入口等）只写\"观察 + 试探性读法\"——陈述你实际看到什么，方向是否放弃由规划者综合全局定；务必给 evidence，手段没穷尽或证据弱（含只探一次、看起来像）标 inferred，确已穷尽且直接看到才标 observed。",
 		obj(map[string]any{
-			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids/route/outcome）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids/route/outcome）；省略 intent_id 则用顶层 intent_id，顶层也省略则默认当前 worker 意图。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
-			"intent_id":  idp("产生本事实的意图 id（你领到的意图；批量时作为各条默认）"),
+			"intent_id":  idp("产生本事实的意图 id（你领到的意图；省略则默认当前 worker 意图，批量时作为各条默认）"),
 			"detail":     str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
 			"evidence":   str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
 			"confidence": str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),

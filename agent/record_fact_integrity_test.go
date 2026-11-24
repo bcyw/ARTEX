@@ -168,7 +168,7 @@ func TestRecordFactPreservesSingleWriteOwnership(t *testing.T) {
 		input      string
 		wantIntent int64
 	}{
-		{"omitted by worker", worker.WorkerTools(), `{"summary":"loose note"}`, 0},
+		{"omitted by worker defaults to current intent", worker.WorkerTools(), `{"summary":"loose note"}`, owner},
 		{"worker with numeric string", worker.WorkerTools(), fmt.Sprintf(`{"summary":"collected note","intent_id":" %d "}`, owner), owner},
 		{"no owner node", NewToolSet(store, "main").MainAgentTools(), fmt.Sprintf(`{"summary":"sorted note","intent_id":%d}`, other), other},
 		{"origin fact is not a worker intent", main.MainAgentTools(), fmt.Sprintf(`{"summary":"another sorted note","intent_id":%d}`, other), other},
@@ -220,9 +220,9 @@ func TestRecordFactBatchDefaultsOnlyOmittedIDs(t *testing.T) {
 	}
 	noDefault := callRecordFactBatch(t, tools, `{"facts":[{"summary":"loose note"}]}`, 1)
 	if noDefault.IDs[0] <= 0 || len(noDefault.Errors) != 0 {
-		t.Errorf("omitted IDs should still allow an unowned fact: %+v", noDefault)
+		t.Errorf("fully omitted IDs should default to the current worker intent: %+v", noDefault)
 	}
-	want := []int64{withDefault.IDs[0], withDefault.IDs[3], invalidDefault.IDs[1]}
+	want := []int64{withDefault.IDs[0], withDefault.IDs[3], invalidDefault.IDs[1], noDefault.IDs[0]}
 	if yielded, err := store.FactsYielded(owner); err != nil || !slices.Equal(yielded, want) {
 		t.Errorf("yielded facts = %v, %v; want %v", yielded, err, want)
 	}
