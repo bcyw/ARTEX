@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/norma/llm"
+	"github.com/Autumn-27/norma/transcript"
 	"github.com/bcyw/artex/agent"
 	"github.com/bcyw/artex/config"
 	"github.com/bcyw/artex/db"
 	"github.com/bcyw/artex/llmrec"
-	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/norma/transcript"
 )
 
 type taskAgentBundle struct {
@@ -571,7 +571,8 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	wk.SetWebSearch(s.webSearchFor("worker"))
-	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
+	wk.SetConstraintInject(s.constraintInjectWorker)     // 操作约束注入 worker(可配置,默认开)
+	wk.SetReferenceVerifier(s.verifyExperimentReference) // 实验交接的流量引用必须真实存在
 	// 票据01: per-run OOB(Interactsh) 会话工厂。默认启用+公共服务，config.json oob 块可改自建或关闭。
 	if oobOpts := config.OOBOptions().Resolve(); oobOpts.Enabled {
 		wk.SetOOBSessionFactory(agent.OOBFactoryFromOptions(true, oobOpts.ServerURL, oobOpts.Token))

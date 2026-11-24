@@ -11,14 +11,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bcyw/artex/db"
-	"github.com/bcyw/artex/intercept"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/norma/transcript"
+	"github.com/bcyw/artex/db"
+	"github.com/bcyw/artex/intercept"
 )
 
 // Worker is an LLM work agent (docs §4.4): it claims ONE intent, completes it
@@ -54,16 +54,19 @@ type WebSearchOpts struct {
 
 type Worker struct {
 	findingRecorder FindingRecorder
-	prov            llm.Provider
-	model           string
-	workDir         string
-	proxyAddr       string
-	proxyCACert     string            // recording proxy's CA cert path (for WebFetch HTTPS verify)
-	webSearch       WebSearchOpts     // web_search tool backend selection (off by default)
-	tx              *transcript.Store // raw LLM conversation persistence (nil = off)
-	window          int               // context window in tokens (for compaction)
-	windowFn        func() int        // optional dynamic task-chain minimum
-	maxTurns        int               // max agent turns per run (0 = unlimited)
+	// referenceVerifier checks experiment handoff references against their owning
+	// host store. nil = non-graph references stay unverified.
+	referenceVerifier func(kind, id string) (string, bool)
+	prov              llm.Provider
+	model             string
+	workDir           string
+	proxyAddr         string
+	proxyCACert       string            // recording proxy's CA cert path (for WebFetch HTTPS verify)
+	webSearch         WebSearchOpts     // web_search tool backend selection (off by default)
+	tx                *transcript.Store // raw LLM conversation persistence (nil = off)
+	window            int               // context window in tokens (for compaction)
+	windowFn          func() int        // optional dynamic task-chain minimum
+	maxTurns          int               // max agent turns per run (0 = unlimited)
 	// runTimeout is the wall-clock budget for the main exploration of one intent
 	// (0 = unlimited). When it fires, the run is cut and a settlement round is
 	// forced so already-identified facts get written back instead of being lost.
@@ -454,6 +457,7 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
 	tsx.SetFindingRecorder(w.findingRecorder)
+	tsx.SetReferenceVerifier(w.referenceVerifier)
 	tsx.SetTaskID(taskID)
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
 	tsx.SetCoverageEnabled(coverageEnabled)

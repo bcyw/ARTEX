@@ -31,9 +31,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/bcyw/artex/db"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/bcyw/artex/db"
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	_ "modernc.org/sqlite"
 )
@@ -1000,6 +1000,20 @@ func (p BodyPart) rawText() string {
 		fmt.Fprintf(&b, "\n…[truncated] @blob sha256:%s (len=%d)", p.Blob, p.Total)
 	}
 	return b.String()
+}
+
+// ReferenceExcerpt reports whether an exchange exists and returns a compact,
+// one-line description (method, URL, status, stored length) for evidence
+// handoffs. It never fabricates a record: unknown ids return ok=false.
+func (t *Traffic) ReferenceExcerpt(id string) (string, bool) {
+	var method, url string
+	var status, respLen int
+	err := t.db.QueryRow(`SELECT method,url,status,COALESCE(resp_len,0) FROM exchanges WHERE id=?`, id).
+		Scan(&method, &url, &status, &respLen)
+	if err != nil {
+		return "", false
+	}
+	return fmt.Sprintf("%s %s -> %d (%d bytes stored)", method, url, status, respLen), true
 }
 
 // GetParts returns both sides with their storage metadata, for preview, paging

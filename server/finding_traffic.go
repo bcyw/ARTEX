@@ -23,6 +23,16 @@ func (s *Server) evidenceStore() *evidence.Store {
 	return evidence.New(s.m.pg, s.m.traffic, filepath.Join(s.m.dir, "evidence"))
 }
 
+// verifyExperimentReference checks a worker's experiment handoff reference against
+// the store that owns it. Only traffic references have a host-side checker today;
+// materials stay unverified rather than being trusted from the model's wording.
+func (s *Server) verifyExperimentReference(kind, id string) (string, bool) {
+	if kind != "traffic" || s.m.traffic == nil || !s.m.TrafficEnabled() {
+		return "", false
+	}
+	return s.m.traffic.ReferenceExcerpt(id)
+}
+
 // Add only new optional properties; preserve edited descriptions, existing
 // properties, agent bindings and disabled flags. The one-time flag also keeps
 // subsequent user unbinding of the evidence reader intact.

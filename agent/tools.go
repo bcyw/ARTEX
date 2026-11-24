@@ -113,6 +113,17 @@ type ToolSet struct {
 	// the planner having to spot it folded into the graph overview. Wired for the main
 	// agent + cross-task orchestration; nil elsewhere → falls back to the bare notify.
 	notifyHint func(texts []string)
+	// verifyReference, if set, checks a non-graph experiment reference (traffic,
+	// material) against its owning store and returns a compact excerpt. nil = such
+	// references stay unverified instead of being trusted on the model's word.
+	verifyReference func(kind, id string) (excerpt string, ok bool)
+}
+
+// SetReferenceVerifier wires the host-side checker for non-graph experiment
+// references (traffic/material). Without it those references are stored as
+// unverified, never as evidence the model merely asserted.
+func (t *ToolSet) SetReferenceVerifier(fn func(kind, id string) (string, bool)) {
+	t.verifyReference = fn
 }
 
 // SetNotifyGoal wires the goal-add trigger callback (see ToolSet.notifyGoal). Set only
@@ -1829,6 +1840,12 @@ func (t *ToolSet) validateExperimentReferences(experiment map[string]any) error 
 			if node == nil {
 				return fmt.Errorf("experiment reference 不存在或不可用")
 			}
+			var payload map[string]any
+			if json.Unmarshal(node.Payload, &payload) == nil {
+				if summary, ok := payload["summary"].(string); ok {
+					ref["excerpt"] = firstLine(summary, 160)
+				}
+			}
 			verified = true
 		case "activity":
 			value, ok := ref["id"].(float64)
@@ -1842,19 +1859,29 @@ func (t *ToolSet) validateExperimentReferences(experiment map[string]any) error 
 			if len(activities) == 0 {
 				return fmt.Errorf("experiment reference 不存在或不可用")
 			}
+			ref["excerpt"] = firstLine(activities[0].Summary, 160)
 			verified = true
 		case "traffic", "material":
 			id, ok := ref["id"].(string)
 			if !ok || strings.TrimSpace(id) == "" {
 				return fmt.Errorf("experiment reference id 无效")
 			}
+			// Traffic ids can be checked by the host's own traffic store; task
+			// materials have no such checker yet, so they stay unverified rather
+			// than being rejected or trusted.
+			if kind == "traffic" && t.verifyReference != nil {
+				excerpt, ok := t.verifyReference(kind, strings.TrimSpace(id))
+				if !ok {
+					return fmt.Errorf("experiment reference 不存在或不可用")
+				}
+				ref["excerpt"] = excerpt
+				verified = true
+			}
 		default:
 			return fmt.Errorf("experiment reference kind 不支持")
 		}
-		// A caller cannot self-assert that a reference was verified. Graph and
-		// activity references are marked only after this store checked them;
-		// traffic/material references remain unverified until their owning host
-		// tool supplies a source-specific check.
+		// A caller cannot self-assert that a reference was verified: only the
+		// store check (or the host verifier) above may set it.
 		ref["verified"] = verified
 	}
 	return nil

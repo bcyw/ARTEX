@@ -2116,7 +2116,7 @@ func (s *ExplorationStore) ActivityByIDs(ids []int64) ([]Activity, error) {
 		ph[i] = fmt.Sprintf("$%d", i+2)
 		args[i+1] = id
 	}
-	rows, err := s.db.Query(`SELECT id, node_id, COALESCE(kind,''), COALESCE(tool,''), is_error, COALESCE(detail,'')
+	rows, err := s.db.Query(`SELECT id, node_id, COALESCE(kind,''), COALESCE(tool,''), is_error, COALESCE(summary,''), COALESCE(detail,'')
 FROM activity WHERE exploration_id=$1 AND kind<>'thinking' AND id IN (`+strings.Join(ph, ",")+`) ORDER BY id`, args...)
 	if err != nil {
 		return nil, err
@@ -2125,7 +2125,7 @@ FROM activity WHERE exploration_id=$1 AND kind<>'thinking' AND id IN (`+strings.
 	out := []Activity{}
 	for rows.Next() {
 		var a Activity
-		if err := rows.Scan(&a.ID, &a.NodeID, &a.Kind, &a.Tool, &a.IsError, &a.Detail); err != nil {
+		if err := rows.Scan(&a.ID, &a.NodeID, &a.Kind, &a.Tool, &a.IsError, &a.Summary, &a.Detail); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
