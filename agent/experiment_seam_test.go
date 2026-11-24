@@ -2,9 +2,11 @@ package agent
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Autumn-27/norma/llm"
 	"github.com/bcyw/artex/db"
 	"github.com/bcyw/artex/traffic"
 )
@@ -13,8 +15,11 @@ import (
 // question and records the completed observation. This is the planner/worker
 // handoff the ticket asks for, run through the real Execute/Plan entry points.
 func TestExperimentHandoffSurvivesNextWorker(t *testing.T) {
-	d := testDB(t)
-	t.Cleanup(func() { _ = d.Close() })
+	dbPath := filepath.Join(t.TempDir(), "business.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	task, err := d.CreateTask("delayed experiment", "save then observe later", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -60,6 +65,24 @@ func TestExperimentHandoffSurvivesNextWorker(t *testing.T) {
 	if err != nil || len(factIDs) != 1 {
 		t.Fatalf("saved experiment fact missing: %v %v", factIDs, err)
 	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d, err = db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	store = d.Exploration(task.ExplorationID)
+	intent, err = store.GetNode(intent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	factIDs, err = store.FactsYielded(intent.ID)
+	if err != nil || len(factIDs) != 1 {
+		t.Fatalf("planned experiment fact did not survive reopen: %v %v", factIDs, err)
+	}
+	provider.add(toolTurn("facts", "list_facts", map[string]any{})...)
 	provider.add(toolTurn("i2", "add_intent", map[string]any{
 		"summary":    "read the delayed import job output",
 		"parent_ids": []int64{factIDs[0]},
@@ -82,6 +105,7 @@ func TestExperimentHandoffSurvivesNextWorker(t *testing.T) {
 		t.Fatal("follow-up intent missing")
 	}
 
+	provider.add(toolTurn("recover", "node_detail", map[string]any{"id": factIDs[0]})...)
 	provider.add(toolTurn("observe", "record_fact", map[string]any{
 		"summary": "delayed import observed executing the supplied expression",
 		"experiment": map[string]any{
@@ -96,6 +120,23 @@ func TestExperimentHandoffSurvivesNextWorker(t *testing.T) {
 	second := NewWorker(provider, "test-model", workDir, nil, 0, 4)
 	if _, _, err := second.Execute(t.Context(), "worker-2", task.ID, nil, store, followUp, nil, nil, nil, nil); err != nil {
 		t.Fatalf("second worker failed: %v", err)
+	}
+	var recovered string
+	for _, request := range provider.reqs {
+		for _, message := range request.Messages {
+			for _, block := range message.Content {
+				if block.Type == llm.BlockToolResult {
+					for _, content := range block.Content {
+						recovered += content.Text
+					}
+				}
+			}
+		}
+	}
+	for _, want := range []string{"does the delayed import job run the supplied expression?", "POST /import with fixture document", "planned", "incomplete", "scheduled job output"} {
+		if !strings.Contains(recovered, want) {
+			t.Fatalf("second worker did not recover %q from the public fact tool: %s", want, recovered)
+		}
 	}
 	observed, err := store.FactsYielded(followUp.ID)
 	if err != nil || len(observed) != 1 {
