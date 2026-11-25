@@ -202,6 +202,59 @@ func TestOperationFactDoesNotInheritIntentConclusion(t *testing.T) {
 	}
 }
 
+func TestOperationRefinementDoesNotPromoteUnsupportedLegacyStops(t *testing.T) {
+	for _, outcome := range []string{"impact", "prerequisite_disproved", "variants_exhausted", "negative"} {
+		for _, tc := range []struct {
+			name, confidence, evidence string
+			wantStop                   bool
+		}{
+			{"no observation or evidence", "", "", false},
+			{"observation without evidence", "observed", "", false},
+			{"evidence without observation", "", "fixture response: control=variant", false},
+			{"inferred conclusion", "inferred", "fixture response: control=variant", false},
+			{"supported observation", "observed", "fixture response: control=variant", true},
+		} {
+			t.Run(outcome+"/"+tc.name, func(t *testing.T) {
+				tools := intentTypeToolSet(t)
+				base := map[string]any{"entry": "https://example.test/historical-stop", "family": "parser"}
+				created := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "historical operation", "route": base})
+				if created.IsError {
+					t.Fatal(created.Flatten())
+				}
+				intentID := parseCreatedIntentID(t, created.Flatten())
+				// Pre-upgrade facts can contain conclusions with no observed basis.
+				factID, err := tools.ts.AddNode(db.KindFact, map[string]any{
+					"summary": "historical conclusion", "outcome": outcome,
+					"confidence": tc.confidence, "evidence": tc.evidence,
+				}, 5, "confirmed", "worker", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := tools.ts.Link(intentID, db.RelYields, factID); err != nil {
+					t.Fatal(err)
+				}
+				fresh, err := tools.ts.AddNode(db.KindFact, map[string]any{
+					"summary": "new discriminator", "confidence": "observed", "evidence": "fixture response: new input handler selected",
+				}, 5, "confirmed", "worker", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{
+					"summary": "refine with a new observation", "parent_ids": []int64{fresh},
+					"route": map[string]any{"entry": base["entry"], "family": base["family"], "method": "POST", "input_location": "body:id"},
+				})
+				if tc.wantStop {
+					if !out.IsError || !strings.Contains(out.Flatten(), "停止") {
+						t.Fatalf("supported historical stop lost its scope: %s", out.Flatten())
+					}
+				} else if out.IsError {
+					t.Fatalf("unsupported legacy conclusion gained stop authority: %s", out.Flatten())
+				}
+			})
+		}
+	}
+}
+
 func TestOperationLegacyMethodRecoveryIsConservative(t *testing.T) {
 	for _, tc := range []struct {
 		name, entry, want string
@@ -291,6 +344,15 @@ func TestOperationWhitespaceCannotBypassManualStop(t *testing.T) {
 }
 
 func TestOperationRefinementKeepsLegacyConsumptionAfterReopen(t *testing.T) {
+	for _, anchoredMethod := range []bool{false, true} {
+		t.Run(fmt.Sprintf("anchored method=%t", anchoredMethod), func(t *testing.T) {
+			checkOperationLegacyConsumptionAfterReopen(t, anchoredMethod)
+		})
+	}
+}
+
+func checkOperationLegacyConsumptionAfterReopen(t *testing.T, anchoredMethod bool) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "legacy-consumption.sqlite")
 	d, err := db.Open(path)
 	if err != nil {
@@ -304,7 +366,15 @@ func TestOperationRefinementKeepsLegacyConsumptionAfterReopen(t *testing.T) {
 	tools := NewToolSet(d.Exploration(task.ExplorationID), "planner")
 	tools.SetTaskID(task.ID)
 	base := map[string]any{"entry": "https://example.test/consumed", "family": "parser"}
-	created := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "old operation", "route": base})
+	var anchors []int64
+	if anchoredMethod {
+		assetID, err := d.Assets().UpsertEndpoint(db.UpsertEndpointReq{URL: base["entry"].(string), Method: "POST", TaskID: task.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		anchors = []int64{assetID}
+	}
+	created := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "old operation", "route": base, "asset_ids": anchors})
 	if created.IsError {
 		t.Fatal(created.Flatten())
 	}
@@ -349,7 +419,15 @@ func TestOperationRefinementKeepsLegacyConsumptionAfterReopen(t *testing.T) {
 	}
 	tools = NewToolSet(d.Exploration(task.ExplorationID), "planner")
 	tools.SetTaskID(task.ID)
-	base["method"], base["input_location"] = "POST", "body:id"
+	base["method"] = "POST"
+	if anchoredMethod {
+		rows := readOperations(t, tools).Routes
+		if len(rows) != 1 || rows[0].Method != "POST" || rows[0].InputLocation != "" {
+			t.Fatalf("legacy method display was not recovered: %+v", rows)
+		}
+	} else {
+		base["input_location"] = "body:id"
+	}
 	for _, parents := range [][]int64{facts, nil} {
 		out := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "refine saved operation", "route": base, "parent_ids": parents})
 		want := "信息"

@@ -86,6 +86,7 @@ func TestRouteStopsOnEstablishedImpactAndUsesConfiguredCap(t *testing.T) {
 	payload := map[string]any{
 		"summary":    "上传链已建立影响",
 		"confidence": "observed",
+		"evidence":   "受控夹具：上传脚本执行 id，输出 uid=1000；文本对照未执行",
 		"route": map[string]any{
 			"entry":     "https://example.test/upload",
 			"family":    "file_upload",
@@ -212,6 +213,7 @@ func TestRouteStopsOnPrerequisiteDisprovedAndVariantsExhausted(t *testing.T) {
 			payload := map[string]any{
 				"summary":    "路线结论 " + tc.outcome,
 				"confidence": "observed",
+				"evidence":   "受控夹具：在相同有效身份下逐项执行前提与剩余变体，对照请求成功，结果见 fixture observation",
 				"intent_id":  intentID,
 				"route": map[string]any{
 					"entry":     "https://example.test/upload",
@@ -721,6 +723,7 @@ func TestRoutePartialFactInheritsParentAndStops(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{
 		"summary":    "上传链已证实命令执行",
 		"confidence": "observed",
+		"evidence":   "受控夹具：上传脚本执行 id，输出 uid=1000；文本对照未执行",
 		"intent_id":  intentID,
 		"route":      map[string]any{"outcome": "impact"},
 	})

@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bcyw/artex/db"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/bcyw/artex/db"
 )
 
 // 票 02：主 planner/worker 编排入口的确定性测试。模型替身只发出固定工具调用，
@@ -310,6 +310,7 @@ func TestRouteOrchestrationImpactStopsContinuation(t *testing.T) {
 	impact := map[string]any{
 		"summary":    "上传链已证实命令执行",
 		"confidence": "observed",
+		"evidence":   "受控夹具：上传脚本执行 id，输出 uid=1000；文本对照未执行",
 		"route": map[string]any{
 			"entry":     "https://example.test/upload",
 			"family":    "file_upload",
@@ -473,6 +474,7 @@ func TestRouteOrchestrationOriginalIntentContinuesThenStops(t *testing.T) {
 		impact := map[string]any{
 			"summary":    "续跑证实命令执行",
 			"confidence": "observed",
+			"evidence":   "受控夹具：反序列化动作触发 id，输出 uid=1000；正常对象对照未执行命令",
 			"intent_id":  intentID,
 			"route": map[string]any{
 				"entry":     "https://example.test/import",

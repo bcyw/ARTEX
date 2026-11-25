@@ -53,6 +53,7 @@ type RouteState struct {
 	Parameter       string
 	Method          string
 	InputLocation   string
+	methodInferred  bool // Display-only method recovered from anchors; absent from the stored identity.
 	Prerequisites   []string
 	Hypothesis      string
 	NextStep        string
@@ -572,14 +573,14 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 			continue
 		}
 		st.LatestNodeID = max(st.LatestNodeID, n.ID)
-		confirmed := !isInferredFact(p)
-		if r != nil && normalizeRoutePart(r.Outcome) == "negative" {
+		if r != nil && routeStopOutcome(r.Outcome) {
 			confidence, _ := p["confidence"].(string)
 			evidence, _ := p["evidence"].(string)
-			confirmed = strings.EqualFold(strings.TrimSpace(confidence), "observed") && strings.TrimSpace(evidence) != ""
-		}
-		if r != nil && routeStopOutcome(r.Outcome) && confirmed {
-			st.Stopped = true
+			// Recovering an operation must not extend an unsupported historical
+			// conclusion's authority. All conclusive outcomes need an observation.
+			if strings.EqualFold(strings.TrimSpace(confidence), "observed") && strings.TrimSpace(evidence) != "" {
+				st.Stopped = true
+			}
 		}
 		if r != nil {
 			information[st.ID] = append(information[st.ID], routeInformation(r))
@@ -597,6 +598,7 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 	for _, st := range states {
 		if st.Method == "" {
 			st.Method = legacyMethods[st.ID]
+			st.methodInferred = st.Method != ""
 		}
 		if manualStops[st.ID] {
 			st.Stopped = true
@@ -972,7 +974,7 @@ func (t *ToolSet) routeContinuation(st *RouteState, it intentItem) error {
 			// A new hash does not erase the ledger for the same operation with
 			// missing fields. Keep distinct known operations independent, and
 			// retain historical IDs so persisted round snapshots remain valid.
-			refined := compatible && (candidate.Method != it.Route.Method || candidate.InputLocation != it.Route.InputLocation)
+			refined := compatible && (candidate.methodInferred || candidate.Method != it.Route.Method || candidate.InputLocation != it.Route.InputLocation)
 			if candidate.ID == combined.ID || refined {
 				history[candidate.ID] = true
 				combined.Intents += candidate.Intents
