@@ -27,17 +27,19 @@ const (
 // route 只是路线上下文（ADR-0006：路线与漏洞结果分开）。
 type Route struct {
 	PriorityBasis string   `json:"priority_basis,omitempty"`
-	Family        string   `json:"family"`                  // 技术机制族：deserialization/ssrf/ssti/sqli/组件CVE/文件读写/…
-	Component     string   `json:"component"`               // 涉及组件与版本（可选，已知组件时填）
-	Entry         string   `json:"entry"`                   // 入口：URL/参数/接口
-	Parameter     string   `json:"parameter,omitempty"`     // 相关参数/组件身份；参与稳定路线身份
-	Prerequisites []string `json:"prerequisites,omitempty"` // 路线成立所需前置条件
-	Hypothesis    string   `json:"hypothesis"`              // 利用假设：为什么认为这条路走得通
-	NextStep      string   `json:"next_step"`               // 下一步验证动作
-	Tested        []string `json:"tested,omitempty"`        // 已测变体（结构化，用于去重）
-	Remaining     []string `json:"remaining,omitempty"`     // 尚未验证的关键假设
-	Outcome       string   `json:"outcome,omitempty"`       // 最近结果：progress/negative/blocked/no_interaction/service_unavailable/insufficient_impact/impact
-	Reason        string   `json:"reason,omitempty"`        // 结果依据（一行）
+	Family        string   `json:"family"`                   // 技术机制族：deserialization/ssrf/ssti/sqli/组件CVE/文件读写/…
+	Component     string   `json:"component"`                // 涉及组件与版本（可选，已知组件时填）
+	Entry         string   `json:"entry"`                    // 入口：URL/参数/接口
+	Parameter     string   `json:"parameter,omitempty"`      // 相关参数/组件身份；参与稳定路线身份
+	Method        string   `json:"method,omitempty"`         // HTTP 方法；未知或非 HTTP 时留空
+	InputLocation string   `json:"input_location,omitempty"` // 输入位置/selector；非 HTTP 时为实际命令或协议上下文
+	Prerequisites []string `json:"prerequisites,omitempty"`  // 路线成立所需前置条件
+	Hypothesis    string   `json:"hypothesis"`               // 利用假设：为什么认为这条路走得通
+	NextStep      string   `json:"next_step"`                // 下一步验证动作
+	Tested        []string `json:"tested,omitempty"`         // 已测变体（结构化，用于去重）
+	Remaining     []string `json:"remaining,omitempty"`      // 尚未验证的关键假设
+	Outcome       string   `json:"outcome,omitempty"`        // 最近结果：progress/negative/blocked/no_interaction/service_unavailable/insufficient_impact/impact
+	Reason        string   `json:"reason,omitempty"`         // 结果依据（一行）
 }
 
 // RouteState 是一次执行路线在规划侧可恢复的状态。它来自既有意图/事实 payload，
@@ -49,6 +51,8 @@ type RouteState struct {
 	Entry           string
 	Component       string
 	Parameter       string
+	Method          string
+	InputLocation   string
 	Prerequisites   []string
 	Hypothesis      string
 	NextStep        string
@@ -202,11 +206,28 @@ func routeIdentity(entry, family, component, parameter string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+func routeIdentityFor(r *Route) string {
+	if r == nil {
+		return ""
+	}
+	base := routeIdentity(r.Entry, r.Family, r.Component, r.Parameter)
+	method, selector := strings.ToUpper(strings.TrimSpace(r.Method)), strings.TrimSpace(r.InputLocation)
+	if base == "" || (method == "" && selector == "") {
+		return base // Keep historical IDs (and their persisted round ledger) stable.
+	}
+	// Selectors are case- and punctuation-sensitive: user.id is not userid or
+	// user.Id. Mechanism-name normalization must never be applied to a selector.
+	sum := sha256.Sum256([]byte(strings.Join([]string{base, method, selector}, "\x00")))
+	return hex.EncodeToString(sum[:8])
+}
+
 func normalizedRoute(r *Route) *Route {
 	if r == nil {
 		return nil
 	}
 	out := *r
+	out.Method = strings.ToUpper(strings.TrimSpace(out.Method))
+	out.InputLocation = strings.TrimSpace(out.InputLocation)
 	return &out
 }
 
@@ -235,13 +256,14 @@ func addRouteState(states map[string]*RouteState, r *Route) *RouteState {
 	if r == nil {
 		return nil
 	}
-	id := routeIdentity(r.Entry, r.Family, r.Component, r.Parameter)
+	r = normalizedRoute(r)
+	id := routeIdentityFor(r)
 	if id == "" {
 		return nil
 	}
 	st := states[id]
 	if st == nil {
-		st = &RouteState{ID: id, Family: r.Family, Entry: r.Entry, Component: r.Component, Parameter: r.Parameter}
+		st = &RouteState{ID: id, Family: r.Family, Entry: r.Entry, Component: r.Component, Parameter: r.Parameter, Method: r.Method, InputLocation: r.InputLocation}
 		states[id] = st
 	}
 	// The route identity owns these fields; later spellings must not rewrite the
@@ -295,13 +317,15 @@ func removeTestedHypotheses(remaining, tested []string) []string {
 func routeSchema() map[string]any {
 	return map[string]any{
 		"type":        "object",
-		"description": "技术利用路线（可选，单条意图一条路线；批量时放各元素内）。family/entry 与关键 component/parameter 共同决定稳定身份：同一路线改 summary、payload 或换意图 id 不会重置预算。",
+		"description": "技术利用路线（可选，单条意图一条路线；批量时放各元素内）。entry/family 与 component/parameter/method/input_location 决定操作身份；不同方法和输入位置独立保留研究状态，同入口/机制共享执行预算，不因细分、改名或换意图 id 重置。",
 		"properties": map[string]any{
 			"priority_basis": str("优先级依据：intermediate_evidence / controllable_input / component_chain / stack_guess。前三项须以 parent_ids 中的实际证据锚定同一真实入口（事实 route.entry 或产生它的意图 route.entry），否则按低优先级处理。"),
 			"family":         str("技术机制族（开放词表：deserialization/ssrf/ssti/sqli/组件CVE/文件读写/命令执行等）"),
 			"component":      str("涉及组件与版本；未知/自定义代码可写 custom:<名称>"),
 			"entry":          str("真实入口 URL/参数/接口"),
 			"parameter":      str("相关参数或组件身份（可选，但同一入口下有多个参数时应填）"),
+			"method":         str("HTTP 方法（GET/POST 等）；未知或非 HTTP 时留空，不推测"),
+			"input_location": str("保留大小写和层级的输入 selector，如 query:id、body:user.id、body:user.Id；查询参数选操作需显式写 query:action=preview。非 HTTP 时填写实际命令/协议上下文，未知留空"),
 			"prerequisites":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "路线成立所需的前置条件（可选，逐条可证伪）"},
 			"hypothesis":     str("利用假设：为什么认为这条路走得通"),
 			"next_step":      str("下一步具体验证动作"),
@@ -341,6 +365,8 @@ func routeStateSummary(st *RouteState) map[string]any {
 		"entry":            routeExcerpt(st.Entry),
 		"component":        routeExcerpt(st.Component),
 		"parameter":        routeExcerpt(st.Parameter),
+		"method":           routeExcerpt(st.Method),
+		"input_location":   routeExcerpt(st.InputLocation),
 		"prerequisites":    routeExcerpts(st.Prerequisites),
 		"hypothesis":       routeExcerpt(st.Hypothesis),
 		"next_step":        routeExcerpt(st.NextStep),
@@ -390,6 +416,35 @@ func appendUniqueInts(dst []int64, vals ...int64) []int64 {
 	return dst
 }
 
+// legacyRouteMethod is display context from unambiguous, matching endpoint
+// anchors. It never rewrites the historical route identity or stored payload.
+func (t *ToolSet) legacyRouteMethod(nodeID int64, entry string) string {
+	u, err := url.Parse(strings.TrimSpace(entry))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	anchors, err := t.ts.NodeAssets([]int64{nodeID})
+	if err != nil {
+		return ""
+	}
+	assets, err := t.ts.DB().Assets().GetByIDs(anchors[nodeID])
+	if err != nil {
+		return ""
+	}
+	method := ""
+	for _, asset := range assets {
+		if asset.Type != "endpoint" || normalizeRouteEntry(asset.URL) != normalizeRouteEntry(entry) {
+			continue
+		}
+		m := strings.ToUpper(strings.TrimSpace(asset.Method))
+		if m == "" || (method != "" && method != m) {
+			return ""
+		}
+		method = m
+	}
+	return method
+}
+
 func (t *ToolSet) routeStates() map[string]*RouteState {
 	states := map[string]*RouteState{}
 	if t == nil || t.ts == nil {
@@ -401,6 +456,8 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 	// service failures are observations about the harness, not route progress.
 	information := map[string][]string{}
 	typeByRoute := map[string]string{}
+	legacyMethods := map[string]string{}
+	manualStops := map[string]bool{}
 	runs, _ := t.ts.IntentRunCounts()
 	nodes, err := t.ts.ListByKind(db.KindIntent, 10000)
 	if err != nil {
@@ -421,7 +478,17 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 		if st == nil {
 			continue
 		}
+		if route.Method == "" {
+			method := t.legacyRouteMethod(n.ID, route.Entry)
+			if previous, seen := legacyMethods[st.ID]; seen && previous != method {
+				method = ""
+			}
+			legacyMethods[st.ID] = method
+		}
 		st.LatestNodeID = max(st.LatestNodeID, n.ID)
+		if n.State == "stopped" || n.State == "paused" {
+			manualStops[st.ID] = true
+		}
 		if n.State != db.StateIntentDeleted {
 			// Each visible intent counts once (it will or did run), and a rerun of
 			// that same intent adds its extra completed runs. This keeps the budget
@@ -442,7 +509,7 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 		if route != nil {
 			information[st.ID] = append(information[st.ID], routeInformation(route))
 		}
-		if cap := payloadRouteCap(p); cap > 0 {
+		if cap := payloadRouteCap(p); cap > 0 && (st.Cap == 0 || cap < st.Cap) {
 			st.Cap = cap
 		}
 		st.ConsumedBasis = appendUniqueInts(st.ConsumedBasis, payloadRouteConsumed(p)...)
@@ -464,7 +531,7 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 			// A partial route such as {"outcome":"impact"} carries no identity.
 			// Leave it unset so the yields edge below inherits the parent intent's
 			// full route; otherwise a bare impact fact would never stop the route.
-			if routeIdentity(r.Entry, r.Family, r.Component, r.Parameter) != "" {
+			if routeIdentityFor(r) != "" {
 				factRoutes[n.ID] = r
 			}
 		}
@@ -472,9 +539,6 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 	if edges, err := t.ts.Edges(5000); err == nil {
 		for _, e := range edges {
 			if e.Rel != db.RelYields {
-				continue
-			}
-			if r := factRoutes[e.To]; r != nil {
 				continue
 			}
 			intent, err := t.ts.GetNode(e.From)
@@ -531,6 +595,14 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 		}
 	}
 	for _, st := range states {
+		if st.Method == "" {
+			st.Method = legacyMethods[st.ID]
+		}
+		if manualStops[st.ID] {
+			st.Stopped = true
+			st.Outcome = "manual_stop"
+			st.Reason = "意图已被停止或暂停，操作细分不能恢复执行"
+		}
 		st.LastInformation = mergeRouteInformation(information[st.ID]...)
 		if vt := typeByRoute[st.ID]; vt != "" {
 			if _, _, reached := t.srcClassCapReached(vt); reached {
@@ -554,7 +626,8 @@ func routeForFact(p map[string]any, inherited *Route) *Route {
 		own = &Route{}
 		own.Outcome, _ = p["outcome"].(string)
 	}
-	if routeIdentity(own.Entry, own.Family, own.Component, own.Parameter) != "" {
+	if routeIdentityFor(own) != "" && (inherited == nil ||
+		routeIdentity(own.Entry, own.Family, own.Component, own.Parameter) != routeIdentity(inherited.Entry, inherited.Family, inherited.Component, inherited.Parameter)) {
 		return own
 	}
 	if inherited == nil {
@@ -575,6 +648,12 @@ func routeForFact(p map[string]any, inherited *Route) *Route {
 	}
 	if strings.TrimSpace(own.Parameter) != "" {
 		out.Parameter = own.Parameter
+	}
+	if strings.TrimSpace(own.Method) != "" {
+		out.Method = own.Method
+	}
+	if strings.TrimSpace(own.InputLocation) != "" {
+		out.InputLocation = own.InputLocation
 	}
 	if len(own.Prerequisites) > 0 {
 		out.Prerequisites = appendUnique(nil, own.Prerequisites...)
@@ -609,31 +688,33 @@ func nodeByID(nodes []*db.Node, id int64) *db.Node {
 	return nil
 }
 
-func (t *ToolSet) applyRouteInformationRounds(states map[string]*RouteState) {
-	if len(states) == 0 {
-		return
-	}
+func (t *ToolSet) routeTaskStopReason() string {
 	taskID, _ := t.ts.TaskID()
 	if taskID <= 0 {
 		taskID = t.taskID
 	}
 	if taskID <= 0 {
-		return
+		return ""
 	}
 	task, _ := t.ts.DB().GetTask(taskID)
 	if task != nil && (task.Paused || db.IsTerminal(task.Status)) {
-		for _, st := range states {
-			st.Stopped = true
-			st.Outcome = routeOutcomeGlobalControl
-			st.Reason = "任务已暂停或处于终态，路线不再续探"
-		}
-		return
+		return "任务已暂停或处于终态，路线不再续探"
 	}
 	if task != nil && task.DeadlineAt != nil && !task.DeadlineAt.After(time.Now()) {
+		return "任务已到达截止时间，路线不再续探"
+	}
+	return ""
+}
+
+func (t *ToolSet) applyRouteInformationRounds(states map[string]*RouteState) {
+	if len(states) == 0 {
+		return
+	}
+	if reason := t.routeTaskStopReason(); reason != "" {
 		for _, st := range states {
 			st.Stopped = true
 			st.Outcome = routeOutcomeGlobalControl
-			st.Reason = "任务已到达截止时间，路线不再续探"
+			st.Reason = reason
 		}
 		return
 	}
@@ -818,24 +899,56 @@ const (
 	routeOutcomeGlobalControl         = "global_control"
 )
 
+// sharedRouteBudget keeps the lowest implicit or explicit ceiling in force.
+// persisted stays zero for implicit limits so later operator changes still apply.
+func sharedRouteBudget(states map[string]*RouteState, route *Route, requested int) (count, cap, persisted int) {
+	hasExplicit := false
+	for _, candidate := range states {
+		if normalizeRouteEntry(candidate.Entry) != normalizeRouteEntry(route.Entry) || normalizeRoutePart(candidate.Family) != normalizeRoutePart(route.Family) {
+			continue
+		}
+		count += candidate.Intents
+		ceiling := candidate.Cap
+		hasExplicit = hasExplicit || ceiling > 0
+		if ceiling <= 0 && candidate.Intents > 0 {
+			ceiling = routeCap()
+		}
+		if ceiling > 0 && (cap == 0 || ceiling < cap) {
+			cap = ceiling
+		}
+	}
+	if requested > 0 && (cap == 0 || requested < cap) {
+		cap = requested
+	}
+	if cap == 0 {
+		cap = routeCap()
+	}
+	if hasExplicit || (requested > 0 && (count == 0 || requested < routeCap())) {
+		persisted = cap
+	}
+	return count, cap, persisted
+}
+
 func (t *ToolSet) routeContinuation(st *RouteState, it intentItem) error {
+	if reason := t.routeTaskStopReason(); reason != "" {
+		return fmt.Errorf("%s", reason)
+	}
 	// Components and parameter positions distinguish route hypotheses, but may
 	// not multiply the shared entry/mechanism execution budget.
 	if it.Route != nil {
-		count, cap := 0, 0
-		for _, candidate := range t.routeStates() {
+		states := t.routeStates()
+		count, cap, _ := sharedRouteBudget(states, it.Route, it.RouteCap)
+		for _, candidate := range states {
 			if normalizeRouteEntry(candidate.Entry) == normalizeRouteEntry(it.Route.Entry) && normalizeRoutePart(candidate.Family) == normalizeRoutePart(it.Route.Family) {
-				count += candidate.Intents
-				if candidate.Cap > 0 && (cap == 0 || candidate.Cap < cap) {
-					cap = candidate.Cap
+				// A legacy stop has unknown method/selector scope. Refining that
+				// unknown operation cannot silently reopen it. Explicitly distinct
+				// operations retain their own conclusions; global/type stops win.
+				methodMatches := candidate.Method == "" || it.Route.Method == "" || strings.EqualFold(candidate.Method, strings.TrimSpace(it.Route.Method))
+				selectorMatches := candidate.InputLocation == "" || it.Route.InputLocation == "" || candidate.InputLocation == strings.TrimSpace(it.Route.InputLocation)
+				if candidate.Stopped && (candidate.TypeCapReached || candidate.Outcome == routeOutcomeGlobalControl || (methodMatches && selectorMatches)) {
+					return fmt.Errorf("入口/机制路线已确定停止（%s）：操作细分不能重置停止条件", firstNonEmpty(candidate.Reason, candidate.Outcome))
 				}
 			}
-		}
-		if it.RouteCap > 0 && (cap == 0 || it.RouteCap < cap) {
-			cap = it.RouteCap
-		}
-		if cap == 0 {
-			cap = routeCap()
 		}
 		if count >= cap {
 			return fmt.Errorf("入口/机制路线已执行 %d/%d 次，达到共享上限", count, cap)
@@ -844,13 +957,13 @@ func (t *ToolSet) routeContinuation(st *RouteState, it intentItem) error {
 	if st == nil {
 		return nil
 	}
-	if st.Cap <= 0 && st.Intents == 0 && it.RouteCap > 0 {
-		st.Cap = it.RouteCap
-	}
-	if st.Cap <= 0 {
-		st.Cap = routeCap()
-	}
 	cap := st.Cap
+	if cap <= 0 {
+		cap = routeCap()
+		if st.Intents == 0 && it.RouteCap > 0 {
+			cap = it.RouteCap
+		}
+	}
 	if st.TypeCapReached {
 		return fmt.Errorf("路线 %s 的目标漏洞类型已达同类上限：既有类型上限优先，不再续探该路线；请改用 record_fact 记录观察或转向其他未触顶类型", st.ID)
 	}
@@ -891,7 +1004,7 @@ func (t *ToolSet) routeContinuation(st *RouteState, it intentItem) error {
 				continue
 			}
 			r := routeFromPayload(p)
-			if r == nil || routeIdentity(r.Entry, r.Family, r.Component, r.Parameter) != st.ID {
+			if r == nil || routeIdentityFor(r) != st.ID {
 				continue
 			}
 			routeIntents[n.ID] = true

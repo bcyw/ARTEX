@@ -1347,10 +1347,11 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if it.Route != nil {
 		states := t.routeStates()
 		route := normalizedRoute(it.Route)
-		state := states[routeIdentity(route.Entry, route.Family, route.Component, route.Parameter)]
+		state := states[routeIdentityFor(route)]
 		if err := t.routeContinuation(state, it); err != nil {
 			return 0, err
 		}
+		_, _, it.RouteCap = sharedRouteBudget(states, route, it.RouteCap)
 		payload["route"] = route
 		if payload["route_consumed"] == nil && len(parents) > 0 {
 			payload["route_consumed"] = parents
@@ -2457,7 +2458,7 @@ func (t *ToolSet) continueIntent() actool.CoreTool {
 			if route == nil {
 				return actool.Errorf("该意图没有路线信息：请传 route（入口/机制族/组件/参数）或改用 add_intent"), nil
 			}
-			if original == nil || routeIdentity(original.Entry, original.Family, original.Component, original.Parameter) != routeIdentity(route.Entry, route.Family, route.Component, route.Parameter) {
+			if original == nil || routeIdentityFor(original) != routeIdentityFor(route) {
 				return actool.Errorf("续跑不得改变原意图的路线身份；新入口或机制请用 add_intent"), nil
 			}
 			parents := pidList(a.ParentIDs)
@@ -2465,10 +2466,11 @@ func (t *ToolSet) continueIntent() actool.CoreTool {
 				return actool.Errorf("parent_ids 必填：续跑必须引用此前未用于该路线的实质 fact/finding"), nil
 			}
 			states := t.routeStates()
-			state := states[routeIdentity(route.Entry, route.Family, route.Component, route.Parameter)]
+			state := states[routeIdentityFor(route)]
 			if err := t.checkRouteContinuation(state, route, parents, a.RouteCap); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
+			_, _, a.RouteCap = sharedRouteBudget(states, route, a.RouteCap)
 			consumed := appendUniqueInts(payloadRouteConsumed(payload), parents...)
 			runs := payloadRouteRuns(payload)
 			if runs < 1 {

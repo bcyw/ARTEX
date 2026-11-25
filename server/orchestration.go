@@ -509,6 +509,7 @@ func (s *Server) seedOrchestrationTools() {
 	}
 	s.refreshBuiltinToolSchemas()
 	s.seedRouteGuidanceToolSchema()
+	s.seedRouteOperationToolSchema()
 	s.refreshTrafficGetSchema()
 	s.refreshTrafficBlobDescription()
 	s.refreshRecordFactExperimentSchema()
@@ -671,6 +672,36 @@ WHERE key='add_intent' AND system AND json_type(schema,$1) IS NULL`, path, strin
 		_ = s.m.pg.SetSetting(flag, "true")
 		return
 	}
+}
+
+// seedRouteOperationToolSchema reaches databases that already ran the route
+// guidance upgrade. Only missing operation fields are added; existing route and
+// tool customization remains authoritative, including after later startups.
+func (s *Server) seedRouteOperationToolSchema() {
+	const flag = "route_operation_tool_schema_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	for _, seed := range agent.BuiltinToolSeeds() {
+		switch seed.Key {
+		case "add_intent", "continue_intent", "record_fact":
+		default:
+			continue
+		}
+		raw, err := json.Marshal(seed.Schema)
+		if err != nil {
+			return
+		}
+		for _, property := range []string{"method", "input_location"} {
+			path := "$.properties.route.properties." + property
+			if _, err := s.m.pg.Exec(`UPDATE tools SET schema=json_insert(schema,$2,json_extract($3,$2)),updated_at=now()
+WHERE key=$1 AND system AND json_type(schema,$2) IS NULL`, seed.Key, path, string(raw)); err != nil {
+				log.Printf("[tools] add %s route property %s: %v", seed.Key, property, err)
+				return
+			}
+		}
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
 }
 
 // refreshBuiltinToolSchemas propagates code schema/description changes on the
