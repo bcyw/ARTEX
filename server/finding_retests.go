@@ -12,10 +12,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	actool "github.com/Autumn-27/norma/tool"
 	"github.com/bcyw/artex/agent"
 	"github.com/bcyw/artex/db"
 	"github.com/bcyw/artex/intercept"
-	actool "github.com/Autumn-27/norma/tool"
 )
 
 func (s *Server) listActiveFindingRetests(w http.ResponseWriter, r *http.Request) {
@@ -237,9 +237,9 @@ func (s *Server) seedFindingRetester() error {
 	return tx.Commit()
 }
 
-// reseedRetesterPrompt 对齐可比前置条件、本次证据与三态判定。
+// reseedRetesterPrompt 对齐可比前置条件、本次证据与不确定复测的状态保留。
 func (s *Server) reseedRetesterPrompt() {
-	s.reseedPromptToDefault(db.FindingRetestAgentKey, "retester_prompt_src_acceptance_v2", agent.RetesterDefaultPrompt, "可比条件与独立复测证据")
+	s.reseedPromptToDefault(db.FindingRetestAgentKey, "retester_prompt_src_acceptance_v3", agent.RetesterDefaultPrompt, "不确定复测保留原发现状态")
 }
 
 func (s *Server) finishRetest(id int64, status, reason string) {

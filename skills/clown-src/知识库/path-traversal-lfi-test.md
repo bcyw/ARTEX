@@ -324,7 +324,7 @@ data:text/plain,<?php system('id');?>    ← note: no double slash variant also 
 phar://uploaded.phar/test.php
 ```
 
-Triggers deserialization of phar metadata → RCE via POP chain (requires file upload of crafted phar, can be disguised as JPEG)
+Archive access alone does not prove object restoration or execution. PHP 8.0 stopped automatic Phar metadata deserialization; follow the actual metadata consumer (for example `Phar::getMetadata()`), PHP version/options and available classes. See [对象恢复：PHP/Phar 与一手来源](deserialization-test.md) and [文件生命周期](file-upload-test.md) before choosing a chain.
 
 ### zip://
 
@@ -507,12 +507,13 @@ Content-Type: application/x-www-form-urlencoded
 # zip://: Upload ZIP containing PHP file
 zip:///tmp/upload.zip#shell.php
 
-# phar://: Triggers deserialization of phar metadata!
+# phar://: archive access; metadata restoration is consumer/version-dependent
 phar:///tmp/upload.phar/anything
-# Create malicious phar with crafted metadata object
-# Can chain to RCE via POP gadget chains (like PHP deserialization)
-# Phar can be disguised as JPG (polyglot phar-jpg)
+# Upload acceptance, archive parsing, metadata restoration and execution are separate stages
+# PHP 8+ does not automatically deserialize metadata on stream access
 ```
+
+For metadata options, actual restore hooks and official PHP sources, use [对象恢复](deserialization-test.md). A filename or polyglot alone is not a consumer prerequisite.
 
 ### wrapwrap (prefix/suffix injection)
 ```

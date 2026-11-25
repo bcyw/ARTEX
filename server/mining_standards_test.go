@@ -72,17 +72,17 @@ func TestMiningStandardsPromptReseed(t *testing.T) {
 	defaults["reporter"] = agent.ReporterDefaultPrompt
 	defaults["retester"] = agent.RetesterDefaultPrompt
 	for _, tc := range []struct {
-		key, flag string
-		reseed    func()
+		key, flag, previousFlag string
+		reseed                  func()
 	}{
-		{"goals", "goals_prompt_src_mining_v5", s.reseedGoalsPrompt},
-		{"mainagent", "mainagent_prompt_src_mining_v4", s.reseedMainAgentPrompt},
-		{"auto", "auto_prompt_src_mining_v1", s.reseedAutoPrompt},
-		{"planner", "planner_prompt_src_mining_v8", s.reseedPlannerPrompt},
-		{"worker", "worker_prompt_src_mining_v11", s.reseedWorkerPrompt},
-		{"pentest", "pentest_prompt_src_mining_v4", s.reseedPentestPrompt},
-		{"reporter", "reporter_prompt_concise_v3", s.reseedReporterPrompt},
-		{"retester", "retester_prompt_src_acceptance_v2", s.reseedRetesterPrompt},
+		{"goals", "goals_prompt_src_mining_v5", "", s.reseedGoalsPrompt},
+		{"mainagent", "mainagent_prompt_src_mining_v4", "", s.reseedMainAgentPrompt},
+		{"auto", "auto_prompt_src_mining_v1", "", s.reseedAutoPrompt},
+		{"planner", "planner_prompt_src_mining_v9", "planner_prompt_src_mining_v8", s.seedOrchestrationTools},
+		{"worker", "worker_prompt_src_mining_v12", "worker_prompt_src_mining_v11", s.seedOrchestrationTools},
+		{"pentest", "pentest_prompt_src_mining_v4", "", s.reseedPentestPrompt},
+		{"reporter", "reporter_prompt_concise_v4", "reporter_prompt_concise_v3", s.seedOrchestrationTools},
+		{"retester", "retester_prompt_src_acceptance_v3", "", s.reseedRetesterPrompt},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
 			a, err := s.m.pg.GetAgentByKey(tc.key)
@@ -101,6 +101,16 @@ func TestMiningStandardsPromptReseed(t *testing.T) {
 				_, _ = s.m.pg.SavePrompt(a.ID, old, "restore fixture", "test")
 				_ = s.m.pg.SetSetting(tc.flag, flag)
 			})
+			if tc.previousFlag != "" {
+				previous, _, err := s.m.pg.GetSetting(tc.previousFlag)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = s.m.pg.SetSetting(tc.previousFlag, previous) })
+				if err := s.m.pg.SetSetting(tc.previousFlag, "true"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err := s.m.pg.SetSetting(tc.flag, ""); err != nil {
 				t.Fatal(err)
 			}
@@ -129,6 +139,11 @@ func TestMiningStandardsPromptReseed(t *testing.T) {
 				t.Fatalf("repeated reseed appended a duplicate version: %v", err)
 			}
 			if _, err := s.m.pg.SavePrompt(a.ID, "USER CUSTOM PROMPT", "user edit", "test"); err != nil {
+				t.Fatal(err)
+			}
+			// A still-pending new migration must also leave a custom current
+			// version alone; an already-consumed flag would not test ownership.
+			if err := s.m.pg.SetSetting(tc.flag, ""); err != nil {
 				t.Fatal(err)
 			}
 			tc.reseed()

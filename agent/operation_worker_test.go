@@ -32,6 +32,7 @@ func TestOperationWorkerBoundsInitialContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := &scriptedProvider{}
+	addFixtureBlocker(provider, "the fixture only exposes the assigned operation metadata; no target response is available")
 	provider.add(textTurn("operation context inspected; no experiment executed")...)
 	taskID, err := tools.ts.TaskID()
 	if err != nil {
@@ -89,10 +90,10 @@ func TestOperationWorkerRetrievesFullSelectorAndHandsOffFact(t *testing.T) {
 	provider := &scriptedProvider{}
 	provider.add(toolTurn("assigned-operation", "node_detail", map[string]any{"id": intent.ID})...)
 	provider.add(toolTurn("operation-handoff", "record_fact", map[string]any{
-		"summary":   "complete operation context handed off; experiment remains planned",
+		"summary":   "complete operation context handed off; observation is blocked",
 		"intent_id": intent.ID,
 		"experiment": map[string]any{
-			"method": "POST", "input_location": selector, "execution_state": "planned",
+			"method": "POST", "input_location": selector, "execution_state": "blocked", "blocker": "the fixture response for the selected operation is unavailable",
 		},
 	})...)
 	provider.add(textTurn("operation context handed off")...)
@@ -165,6 +166,7 @@ func TestOperationWorkerPreservesOrdinaryFieldsAndExplicitProof(t *testing.T) {
 				t.Fatal(err)
 			}
 			provider := &scriptedProvider{}
+			addFixtureBlocker(provider, "the fixture only exposes the standard card; no target proof was executed")
 			provider.add(textTurn("standard card inspected; no experiment executed")...)
 			taskID, err := tools.ts.TaskID()
 			if err != nil {

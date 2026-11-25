@@ -2,57 +2,57 @@ package db
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 )
 
-// TestRetestConsecutiveInconclusive 验证 SRC 复测纪律的「连续」语义：
-// 连续 2 次 inconclusive → false_positive；中间一次 reproduced 断链重数，
-// 之后单次 inconclusive 不触发误报判定。
+// Uncertainty is retained across repeated retests and a database reopen; it
+// cannot replace the original disposition or erase the reasons for each run.
 func TestRetestConsecutiveInconclusive(t *testing.T) {
-	d, err := Open(testDSN(t))
-	if err != nil {
-		t.Fatalf("SQLite unavailable (%v)", err)
-	}
-	defer d.Close()
-
-	expID, err := d.CreateExploration("retest-consecutive-test", "测试目标")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Exec(`DELETE FROM explorations WHERE id=$1`, expID)
-	es := d.Exploration(expID)
-
-	out, err := es.RecordFinding(context.Background(), RecordFindingInput{
-		ExplorationID: expID,
-		VulnClass:     "sqli", Severity: "high",
-		Summary: "注入", Evidence: "poc", Worker: "worker",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Exec(`DELETE FROM findings WHERE id=$1`, out.FindingID)
-
-	ctx := context.Background()
-
-	// 第 1 次 inconclusive：不触发误报。
-	_ = runRetestForFinding(t, d, ctx, out.FindingID, "inconclusive", "第一次无法确认")
-	if s := findingStatusByID(t, d, out.FindingID); s != FindingPending {
-		t.Fatalf("第 1 次 inconclusive 后状态 = %q, want pending", s)
-	}
-
-	// 中间一次 reproduced：断链 + 佐证有效。
-	_ = runRetestForFinding(t, d, ctx, out.FindingID, "reproduced", "复现成功")
-
-	// 之后单次 inconclusive：连续数只有 1，不触发误报。
-	_ = runRetestForFinding(t, d, ctx, out.FindingID, "inconclusive", "再次无法确认")
-	if s := findingStatusByID(t, d, out.FindingID); s != FindingPending {
-		t.Fatalf("断链后单次 inconclusive 状态 = %q, want pending", s)
-	}
-
-	// 再来一次 inconclusive：连续数 2 → 误报。
-	_ = runRetestForFinding(t, d, ctx, out.FindingID, "inconclusive", "第三次无法确认")
-	if s := findingStatusByID(t, d, out.FindingID); s != FindingFalsePositive {
-		t.Fatalf("连续 2 次 inconclusive 后状态 = %q, want false_positive", s)
+	for _, status := range []string{FindingPending, FindingInProgress, FindingConfirmed, FindingResolved, FindingFixed, FindingFalsePositive, FindingIgnored, FindingDuplicate, FindingRiskAccepted, FindingQuarantined} {
+		t.Run(status, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "retest.sqlite")
+			d, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = d.Close() })
+			fid, err := d.AddFinding(0, 0, "retest-consecutive", "测试发现", "high", "summary", "original proof", "worker", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.SetFindingStatus(fid, status); err != nil {
+				t.Fatal(err)
+			}
+			reasons := map[int64]string{}
+			for _, reason := range []string{"会话已过期，无法重放原身份", "环境权限变化，正常对照不可用", "工具失败，尚未得到响应"} {
+				r := runRetestForFinding(t, d, t.Context(), fid, "inconclusive", reason)
+				reasons[r.ID] = reason
+				if got := findingStatusByID(t, d, fid); got != status {
+					t.Fatalf("inconclusive changed disposition: got %s, want %s", got, status)
+				}
+			}
+			if err := d.Close(); err != nil {
+				t.Fatal(err)
+			}
+			d, err = Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			finding, err := d.GetFinding(fid)
+			if err != nil || finding == nil || finding.Status != status || finding.Evidence != "original proof" {
+				t.Fatalf("reopened finding changed: %+v, %v", finding, err)
+			}
+			history, err := d.ListFindingRetests(fid)
+			if err != nil || len(history) != len(reasons) {
+				t.Fatalf("reopened retest history: %+v, %v", history, err)
+			}
+			for _, r := range history {
+				if r.Status != "completed" || r.Verdict != "inconclusive" || r.Summary != reasons[r.ID] || r.Evidence != "evidence markdown" || r.FinishedAt == nil {
+					t.Fatalf("uncertainty/reason/evidence lost: %+v", r)
+				}
+			}
+		})
 	}
 }
 

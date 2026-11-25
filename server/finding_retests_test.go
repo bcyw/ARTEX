@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Autumn-27/norma/llm"
+	actool "github.com/Autumn-27/norma/tool"
 	"github.com/bcyw/artex/agent"
 	"github.com/bcyw/artex/db"
 	"github.com/bcyw/artex/intercept"
-	"github.com/Autumn-27/norma/llm"
-	actool "github.com/Autumn-27/norma/tool"
 )
 
 type retestProvider struct {
@@ -294,7 +294,10 @@ func TestRetestReseedPrompt(t *testing.T) {
 	}
 	// 包内测试共享同一个 SQLite：先跑的其他测试可能已让完整 Server 启动路径
 	// 消费过 reseed flag。这里显式复位，保证本测试与执行顺序无关。
-	if err := s.m.pg.SetSetting("retester_prompt_src_acceptance_v2", ""); err != nil {
+	if err := s.m.pg.SetSetting("retester_prompt_src_acceptance_v2", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.m.pg.SetSetting("retester_prompt_src_acceptance_v3", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Simulate an old DB: replace the prompt with a stale version.
@@ -310,6 +313,9 @@ func TestRetestReseedPrompt(t *testing.T) {
 	}
 	if cur != agent.RetesterDefaultPrompt {
 		t.Fatalf("after reseed: got %q, want RetesterDefaultPrompt", cur)
+	}
+	if !strings.Contains(cur, "保留原发现状态") || strings.Contains(cur, "系统会按既有规则处理连续 2 次 inconclusive") {
+		t.Fatalf("retester still promises uncertainty-based triage: %s", cur)
 	}
 
 	// Simulate user customization after reseed.

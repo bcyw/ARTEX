@@ -513,6 +513,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.refreshTrafficGetSchema()
 	s.refreshTrafficBlobDescription()
 	s.refreshRecordFactExperimentSchema()
+	s.refreshEvidenceHandoffDescriptions()
 	s.seedAutoDefaultBindings()
 	s.seedPlannerDefaultBindings()
 	s.seedPlannerListAssetsBinding()
@@ -644,6 +645,56 @@ WHERE key='record_fact' AND system AND json_type(schema,$1) IS NULL`, path, stri
 		_ = s.m.pg.SetSetting(flag, "true")
 		return
 	}
+}
+
+// refreshEvidenceHandoffDescriptions replaces only the untouched descriptions
+// seeded by 7b8efeb. Schema shape, constraints and tool availability remain owned
+// by the operator; missing properties are handled by the existing additive seeds.
+func (s *Server) refreshEvidenceHandoffDescriptions() {
+	const flag = "evidence_handoff_tool_descriptions_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	changes := []struct {
+		key, property, previous string
+	}{
+		{"report_finding", "", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。description / impact / remediation 按交付报告文体填写：直接描述功能与根因、已验证的影响、可执行的修复，不写工具名、检索过程或“未绑定流量”之类的过程说明。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。"},
+		{"report_finding", "evidence", "证据/PoC 文本：精选最能证明漏洞的关键片段（≤20 行），完整请求/响应报文应通过 traffic_refs 绑定流量记录，不在 evidence 里整段倾倒"},
+		{"report_finding", "intent_id", "当前任务的意图 id"},
+		{"record_fact", "experiment", "可选的可恢复实验交接：question（待验证问题）、existing_evidence（已有证据）、discovery（static/simulated/executed）、controllable_input、identity（身份/业务状态）、normal_operation（正常操作基线）、variables（声明的变量）、actions（操作序列）、observation（位置/窗口/摘录/state=complete|incomplete|unknown）、execution_state（planned/executed/blocked/unknown）、probe（allocated/send_state=allocated_only|sent|script_unknown|blocked/send_basis）、conclusion、blocker、references（可追溯材料引用）。仅陈述实际可验证状态；模型自填引用不能证明材料存在，未知/未执行不得伪称已执行。"},
+		{"get_worker_trace", "", "查看某条意图(work)的【执行过程】（区别于 get_worker_output 只给最终结论）。三种用法：\n" +
+			"① 只传 intent_id → 返回该 work 每一步的摘要流（summary≤100字，含 step_id；只是动作轮廓，不含完整输出）；\n" +
+			"② intent_id + q → 只返回命中关键字的步骤摘要（在摘要和完整输出里都搜；仍只给 summary，要看内容用③）；\n" +
+			"③ intent_id + step_ids → 返回这些步骤的完整内容(detail)；一次最多取 5 个，超出只返回前 5 个并在 notice/omitted_step_ids 里告知未取的。\n" +
+			"典型流程：先①/②定位可疑步骤的 step_id，再用③取其完整输出。不含思考(thinking)步骤。支持直接关联任务的历史 trace；其结果带 source_task_id/inherited=true 且只读。"},
+	}
+	for _, seed := range agent.BuiltinToolSeeds() {
+		for _, change := range changes {
+			if seed.Key != change.key {
+				continue
+			}
+			var err error
+			if change.property == "" {
+				_, err = s.m.pg.Exec(`UPDATE tools SET description=$2,updated_at=now()
+WHERE key=$1 AND system AND description=$3`, seed.Key, seed.Desc, change.previous)
+			} else {
+				properties, _ := seed.Schema["properties"].(map[string]any)
+				property, _ := properties[change.property].(map[string]any)
+				description, _ := property["description"].(string)
+				if description == "" {
+					return
+				}
+				path := "$.properties." + change.property + ".description"
+				_, err = s.m.pg.Exec(`UPDATE tools SET schema=json_replace(schema,$2,$3),updated_at=now()
+WHERE key=$1 AND system AND json_extract(schema,$2)=$4`, seed.Key, path, description, change.previous)
+			}
+			if err != nil {
+				log.Printf("[tools] refresh %s/%s handoff description: %v", seed.Key, change.property, err)
+				return
+			}
+		}
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
 }
 
 // Only insert the newly introduced optional fields. Existing schema edits,
@@ -808,12 +859,12 @@ func (s *Server) reseedAutoPrompt() {
 
 // reseedPlannerPrompt 对齐类型化意图、标准卡与 type_coverage 规划反馈。
 func (s *Server) reseedPlannerPrompt() {
-	s.reseedPromptToDefault("planner", "planner_prompt_src_mining_v8", agent.BuiltinPromptSeeds()["planner"], "高价值假设与证据推进")
+	s.reseedPromptToDefault("planner", "planner_prompt_src_mining_v9", agent.BuiltinPromptSeeds()["planner"], "高价值假设与证据推进")
 }
 
 // reseedWorkerPrompt 对齐本类标准卡、证明物止损与意图类型锚定。
 func (s *Server) reseedWorkerPrompt() {
-	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v11", agent.BuiltinPromptSeeds()["worker"], "基线、对照、危害与可恢复实验交接")
+	s.reseedPromptToDefault("worker", "worker_prompt_src_mining_v12", agent.BuiltinPromptSeeds()["worker"], "基线、对照、危害与可恢复实验交接")
 }
 
 // reseedPentestPrompt 对齐独立挖掘的可收类型目录与证明物、止损线。
@@ -906,7 +957,7 @@ func (s *Server) upgradeReporterTriggerMessageV2() {
 
 // reseedReporterPrompt 对齐证据来源、影响边界与报告版本核对。
 func (s *Server) reseedReporterPrompt() {
-	s.reseedPromptToDefault("reporter", "reporter_prompt_concise_v3", agent.ReporterDefaultPrompt, "证据对账与可复现交付")
+	s.reseedPromptToDefault("reporter", "reporter_prompt_concise_v4", agent.ReporterDefaultPrompt, "证据对账与可复现交付")
 }
 
 // seedReporterAgent 预置一个「报告撰写」自定义 agent(builtin=false，可在 UI 编辑/删除)：

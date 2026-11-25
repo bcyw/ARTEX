@@ -262,53 +262,8 @@ func (d *DB) FinishFindingRetest(id int64, status, reason string) error {
 			return err
 		}
 	}
-	// SRC 复测纪律:【连续】2 次完成复测均无法复现(结论为 inconclusive)→
-	// 自动标 false_positive。「连续」= 从最近一次完成的复测往回数,中间出现
-	// reproduced/fixed 即断链重数——一次成功复现应重新建立对 finding 的信任。
-	// 只影响仍处 pending/in_progress 的 finding,人工的 confirmed/处置结论
-	// 不被自动复测覆盖。判误报失败按错误返回,不静默吞掉。
-	if finalStatus == "completed" && verdict == "inconclusive" {
-		var consecutive int
-		// 按时间正序取全部已完成复测的结论,从尾部数连续 inconclusive;
-		// 当前这条刚在上面 UPDATE 完成,已包含在结果里。
-		rows, err := tx.Query(`SELECT verdict FROM finding_retests
-			WHERE finding_id=$1 AND status='completed' AND verdict <> ''
-			ORDER BY finished_at, id`, findingID)
-		if err != nil {
-			return err
-		}
-		var verdicts []string
-		for rows.Next() {
-			var v string
-			if err := rows.Scan(&v); err != nil {
-				rows.Close()
-				return err
-			}
-			verdicts = append(verdicts, v)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		rows.Close()
-		for i := len(verdicts) - 1; i >= 0; i-- {
-			if verdicts[i] != "inconclusive" {
-				break
-			}
-			consecutive++
-		}
-		if consecutive >= 2 {
-			var cur string
-			if err := tx.QueryRow(`SELECT status FROM findings WHERE id=$1`, findingID).Scan(&cur); err != nil {
-				return err
-			}
-			if cur == FindingPending || cur == FindingInProgress {
-				if _, _, _, _, err := SetFindingStatusTx(context.Background(), tx, findingID, FindingFalsePositive); err != nil {
-					return err
-				}
-			}
-		}
-	}
+	// Inconclusive records uncertainty, not counter-evidence. Preserve the
+	// finding's disposition regardless of how many such results precede it.
 	return tx.Commit()
 }
 

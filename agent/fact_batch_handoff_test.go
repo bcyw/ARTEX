@@ -58,7 +58,7 @@ func TestWorkerFactBatchIsAvailableToPlannerAfterDatabaseReopen(t *testing.T) {
 				"observation": map[string]any{
 					"position": "saved fixture response",
 					"window":   "one recorded response",
-					"state":    "complete",
+					"state":    "unknown", // supplied text, not a tool-observed result
 					"excerpt":  observations,
 				},
 			},
@@ -175,6 +175,14 @@ func TestWorkerFactBatchIsAvailableToPlannerAfterDatabaseReopen(t *testing.T) {
 		var payload map[string]any
 		if err := json.Unmarshal(node.Payload, &payload); err != nil {
 			t.Fatal(err)
+		}
+		if experiment, ok := payload["experiment"].(map[string]any); ok {
+			run, ok := experiment["run"].(map[string]any)
+			runID, _ := run["run_id"].(string)
+			if !ok || runID == "" || run["task_id"] != float64(task.ID) || run["intent_id"] != float64(intentID) {
+				t.Fatalf("planner lost host attribution for supplied material: %+v", experiment)
+			}
+			delete(experiment, "run") // compare the original user-authored context below
 		}
 		if node.ID != id || node.Kind != db.KindFact || !reflect.DeepEqual(payload, wantFacts[i]) {
 			t.Fatalf("planner node_detail lost complete observations for batch index %d: node=%+v payload=%+v", i*2, node, payload)

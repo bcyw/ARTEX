@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"iter"
 	"strings"
 	"sync"
@@ -178,6 +177,7 @@ func TestRouteOrchestrationOOBEvidenceContinuesOnceThenStops(t *testing.T) {
 
 	provider.add(toolTurn("w1", "oob_generate", map[string]any{"count": 1})...)
 	provider.add(toolTurn("w2", "oob_poll", map[string]any{"wait": 1})...)
+	provider.add(toolTurn("blocker", "record_fact", map[string]any{"summary": "callback requires trigger attribution", "experiment": map[string]any{"execution_state": "blocked", "blocker": "the correlated import trigger response has not yet been recovered"}})...)
 	provider.add(textTurn("收到带外回调，已记录事实")...)
 	session := &fakeSession{url: "nonce.example.test"}
 	session.interactions = []OOBInteraction{{Protocol: "dns", UniqueID: "probe-1", Remote: "198.51.100.9"}}
@@ -203,6 +203,7 @@ func TestRouteOrchestrationOOBEvidenceContinuesOnceThenStops(t *testing.T) {
 	if oobPayload["outcome"] != "progress" {
 		t.Fatalf("回调事实应为 progress: %+v", oobPayload)
 	}
+	observation := routeObservationFact(t, NewToolSet(ts, "planner"), firstIntent.ID, map[string]any{"summary": "recovered callback attribution", "confidence": "observed", "evidence": "DNS callback remote=198.51.100.9; recovered import trigger"})
 
 	continuedRoute := map[string]any{
 		"entry":         "https://EXAMPLE.test/import?url=next",
@@ -217,7 +218,7 @@ func TestRouteOrchestrationOOBEvidenceContinuesOnceThenStops(t *testing.T) {
 	}
 	provider.add(toolTurn("p2", "add_intent", map[string]any{
 		"summary":    "用 OOB 事实续探反序列化危害",
-		"parent_ids": []int64{oobFactID},
+		"parent_ids": []int64{oobFactID, observation},
 		"route":      continuedRoute,
 	})...)
 	provider.add(textTurn("已续探一次")...)
@@ -234,6 +235,7 @@ func TestRouteOrchestrationOOBEvidenceContinuesOnceThenStops(t *testing.T) {
 	}
 	second := intents[0]
 	provider.add(toolTurn("w3", "oob_poll", map[string]any{"wait": 1})...)
+	provider.add(toolTurn("blocker2", "record_fact", map[string]any{"summary": "empty observation window", "experiment": map[string]any{"execution_state": "unknown", "blocker": "the follow-up observation window has no attributable callback"}})...)
 	provider.add(textTurn("续探已执行并按证据停止")...)
 	continuedSession := &fakeSession{url: "nonce.example.test"}
 	worker2 := NewWorker(provider, "test-model", workDir, nil, 0, 6)
@@ -319,11 +321,7 @@ func TestRouteOrchestrationImpactStopsContinuation(t *testing.T) {
 			"reason":    "webshell 已执行",
 		},
 	}
-	raw, _ := json.Marshal(impact)
-	result, err := NewToolSet(ts, "worker-1").recordFact().Call(t.Context(), raw, nil)
-	if err != nil || result.IsError {
-		t.Fatalf("记录 impact 失败: %v %s", err, result.Flatten())
-	}
+	routeObservationFact(t, NewToolSet(ts, "planner"), firstID, impact)
 	if err := ts.SetIntentState(firstID, "done"); err != nil {
 		t.Fatal(err)
 	}
@@ -371,6 +369,7 @@ func TestRouteOrchestrationNoInteractionDoesNotRetryWorker(t *testing.T) {
 	firstIntent := intents[0]
 	provider.add(toolTurn("w1", "oob_generate", map[string]any{"count": 1})...)
 	provider.add(toolTurn("w2", "oob_poll", map[string]any{"wait": 1})...)
+	provider.add(toolTurn("blocker", "record_fact", map[string]any{"summary": "empty observation window", "experiment": map[string]any{"execution_state": "unknown", "blocker": "the healthy OOB window closed without a correlated callback"}})...)
 	provider.add(textTurn("健康空窗口，已记录 no_interaction")...)
 	worker := NewWorker(provider, "test-model", workDir, nil, 0, 6)
 	sessionCreates := 0
@@ -441,6 +440,7 @@ func TestRouteOrchestrationOriginalIntentContinuesThenStops(t *testing.T) {
 
 	provider.add(toolTurn("w1", "oob_generate", map[string]any{"count": 1})...)
 	provider.add(toolTurn("w2", "oob_poll", map[string]any{"wait": 1})...)
+	provider.add(toolTurn("blocker", "record_fact", map[string]any{"summary": "callback requires trigger attribution", "experiment": map[string]any{"execution_state": "blocked", "blocker": "the correlated import trigger response has not yet been recovered"}})...)
 	provider.add(textTurn("收到回调")...)
 	session := &fakeSession{url: "nonce.example.test"}
 	session.interactions = []OOBInteraction{{Protocol: "dns", UniqueID: "probe-1", Remote: "198.51.100.9"}}
@@ -453,11 +453,12 @@ func TestRouteOrchestrationOriginalIntentContinuesThenStops(t *testing.T) {
 		t.Fatal(err)
 	}
 	oobFactID, _ := oobFactFrom(t, ts, original.ID)
+	observation := routeObservationFact(t, NewToolSet(ts, "planner"), original.ID, map[string]any{"summary": "recovered callback attribution", "confidence": "observed", "evidence": "DNS callback remote=198.51.100.9; recovered import trigger"})
 
 	provider.add(toolTurn("p2", "continue_intent", map[string]any{
 		"intent_id":  original.ID,
 		"message":    "回调已确认，继续升级到命令执行",
-		"parent_ids": []int64{oobFactID},
+		"parent_ids": []int64{oobFactID, observation},
 		"route":      route,
 	})...)
 	provider.add(textTurn("通过原意图续跑")...)
@@ -466,10 +467,6 @@ func TestRouteOrchestrationOriginalIntentContinuesThenStops(t *testing.T) {
 		continued++
 		if _, err := ts.CompareAndSetIntentState(intentID, "paused", "running"); err != nil {
 			return err
-		}
-		node, err := ts.GetNode(intentID)
-		if err != nil || node == nil {
-			return fmt.Errorf("读取续跑意图失败: %w", err)
 		}
 		impact := map[string]any{
 			"summary":    "续跑证实命令执行",
@@ -483,13 +480,7 @@ func TestRouteOrchestrationOriginalIntentContinuesThenStops(t *testing.T) {
 				"outcome":   "impact",
 			},
 		}
-		raw, _ := json.Marshal(impact)
-		if res, err := NewToolSet(ts, "worker-2").recordFact().Call(t.Context(), raw, nil); err != nil || res.IsError {
-			return fmt.Errorf("续跑记录影响失败: %v %s", err, res.Flatten())
-		}
-		if _, _, err := worker.ExecuteWithMessage(t.Context(), "worker-2", task.ID, nil, ts, node, nil, nil, nil, nil, "req-1", msg); err != nil {
-			return err
-		}
+		routeObservationFact(t, NewToolSet(ts, "planner"), intentID, impact, msg)
 		return ts.SetIntentState(intentID, "done")
 	})
 	if _, _, err := planner.Plan(t.Context(), task.ID, nil, ts, task.Goal, nil, nil); err != nil {

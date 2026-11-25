@@ -12,7 +12,6 @@ import (
 	"time"
 
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/bcyw/artex/db"
 )
 
 // 票据 01：oob_generate / oob_poll 两个 worker 工具。
@@ -194,14 +193,15 @@ func (t *ToolSet) oobGenerate(s oobSession, reg *probeRegistry) actool.CoreTool 
 							"probes": probes, "status": "observation_incomplete", "error": err.Error(),
 						})
 					}
-					if saveErr := t.recordOOBUnavailable(err, oobObservation{Phase: "allocation", RunID: reg.runID}); saveErr != nil {
-						return actool.Errorf(err.Error()), nil
-					}
-					return jsonResult(map[string]any{
+					out := map[string]any{
 						"probes": probes,
 						"status": "service_unavailable",
 						"error":  err.Error(),
-					})
+					}
+					if saveErr := t.recordOOBUnavailable(err, oobObservation{Phase: "allocation", RunID: reg.runID}); saveErr != nil {
+						out["fact_error"] = saveErr.Error()
+					}
+					return jsonResult(out)
 				}
 				reg.allocated[id] = struct{}{}
 				probes = append(probes, map[string]string{"probe_id": id, "url": host, "domain": host, "http_url": "http://" + host})
@@ -281,7 +281,9 @@ func (t *ToolSet) oobPoll(s oobSession, reg *probeRegistry) actool.CoreTool {
 				case outcome == "observation_incomplete":
 					out["hint"] = "观察窗口内没有完成一次轮询，常由 OOB 服务故障引起；可稍后重试，或配置自建 Interactsh 服务（config.json 的 oob 块）。"
 				}
-				if id, saveErr := t.recordOOBOutcome(outcome, summary, "", err.Error(), observation); saveErr == nil && id > 0 {
+				if id, saveErr := t.recordOOBOutcome(outcome, summary, "", err.Error(), observation); saveErr != nil {
+					out["fact_error"] = saveErr.Error()
+				} else if id > 0 {
 					out["fact_id"] = id
 				}
 				return jsonResult(out)
@@ -306,7 +308,9 @@ func (t *ToolSet) oobPoll(s oobSession, reg *probeRegistry) actool.CoreTool {
 			if len(its) > 0 {
 				evidence = detail
 			}
-			if id, saveErr := t.recordOOBOutcome(outcome, summary, detail, evidence, observation); saveErr == nil && id > 0 {
+			if id, saveErr := t.recordOOBOutcome(outcome, summary, detail, evidence, observation); saveErr != nil {
+				out["fact_error"] = saveErr.Error()
+			} else if id > 0 {
 				out["fact_id"] = id
 			}
 			return jsonResult(out)
@@ -333,7 +337,19 @@ func oobToolsForRun(t *ToolSet, s oobSession) []actool.CoreTool {
 	if s == nil || t == nil {
 		return nil
 	}
-	reg := &probeRegistry{gate: make(chan struct{}, 1), allocated: make(map[string]struct{}), seen: make(map[string]struct{}), runID: rand.Text()}
+	runID := t.runInfo.RunID
+	if runID == "" { // Standalone tool callers have no Worker invocation.
+		runID = rand.Text()
+	}
+	reg := &probeRegistry{gate: make(chan struct{}, 1), allocated: make(map[string]struct{}), seen: make(map[string]struct{}), runID: runID}
+	t.verifyProbe = func(id string) bool {
+		if err := reg.acquire(context.Background()); err != nil {
+			return false
+		}
+		defer reg.release()
+		_, owned := reg.allocated[id]
+		return owned && s.checkOpen() == nil
+	}
 	return []actool.CoreTool{t.oobGenerate(s, reg), t.oobPoll(s, reg)}
 }
 
@@ -369,12 +385,9 @@ func (t *ToolSet) recordOOBOutcome(outcome, summary, detail, evidence string, ob
 			}
 		}
 	}
-	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, nil)
+	id, err := t.ts.AddFactForIntent(t.ownerNode, payload, t.worker, nil)
 	if err != nil {
 		return 0, err
-	}
-	if err := t.ts.Link(t.ownerNode, db.RelYields, id); err != nil {
-		return id, err
 	}
 	t.writes.Facts++
 	return id, nil

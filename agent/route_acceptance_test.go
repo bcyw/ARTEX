@@ -53,18 +53,12 @@ func TestAcceptanceRouteReconToTypedVerificationGate(t *testing.T) {
 	reconID := parseCreatedIntentID(t, out)
 
 	// ② OOB 回调事实落地后，带可收类型的正式验证意图允许建立。
-	fact, err := ts.AddNode(db.KindFact, map[string]any{
+	fact := routeObservationFact(t, tools, reconID, map[string]any{
 		"summary": "DNS 回调已确认", "confidence": "observed",
 		"evidence": "dns probe-1 from 198.51.100.9",
 		"outcome":  "progress",
 		"route":    route,
-	}, 8, "confirmed", "worker", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ts.Link(reconID, db.RelYields, fact); err != nil {
-		t.Fatal(err)
-	}
+	})
 	route2 := map[string]any{"entry": route["entry"], "family": route["family"], "component": route["component"], "tested": []string{"dns-gadget"}}
 	out, failed = callIntent(t, tools, map[string]any{
 		"summary": "正式验证反序列化 RCE 危害", "vuln_type": "测试甲类", "proof": "甲类最小证明物",

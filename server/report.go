@@ -16,7 +16,7 @@ import (
 // taskReportInput assembles the deliverable report for one task. Everything the
 // renderer needs is resolved here: confirmed findings, their report sections,
 // asset labels and the bound evidence bodies. Nothing is guessed — a finding
-// without bindings simply has no reproduction steps.
+// without bindings retains its recorded PoC without synthesizing raw packets.
 func (s *Server) taskReportInput(ctx context.Context, taskID int64) (report.Input, error) {
 	rows, err := s.m.pg.ListTaskReportFindings(ctx, taskID)
 	if err != nil {

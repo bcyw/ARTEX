@@ -12,8 +12,8 @@ import (
 )
 
 // A worker saves a planned delayed trigger; a later worker recovers the same
-// question and records the completed observation. This is the planner/worker
-// handoff the ticket asks for, run through the real Execute/Plan entry points.
+// question and preserves an incomplete observation. No actual trigger runs in
+// this JSON-context test; TestExperimentRealDelayedHandoff covers real execution.
 //
 // Scope: the provider is scripted, so this proves the deterministic orchestration
 // and that each worker's own assembled input carries the saved experiment (and
@@ -127,16 +127,16 @@ func TestExperimentHandoffSurvivesNextWorker(t *testing.T) {
 	workerReqStart := len(provider.reqs)
 	provider.add(toolTurn("recover", "node_detail", map[string]any{"id": factIDs[0]})...)
 	provider.add(toolTurn("observe", "record_fact", map[string]any{
-		"summary": "delayed import observed executing the supplied expression",
+		"summary": "delayed import observation still needs its real trigger",
 		"experiment": map[string]any{
 			"question":          "does the delayed import job run the supplied expression?",
 			"reference_fact_id": factIDs[0],
-			"execution_state":   "executed",
-			"observation":       map[string]any{"position": "scheduled job output", "state": "complete", "excerpt": "expr evaluated"},
+			"execution_state":   "unknown",
+			"observation":       map[string]any{"position": "scheduled job output", "state": "incomplete"},
 			"references":        []any{map[string]any{"kind": "node", "id": factIDs[0]}},
 		},
 	})...)
-	provider.add(textTurn("observation completed")...)
+	provider.add(textTurn("incomplete observation recovered")...)
 	second := NewWorker(provider, "test-model", workDir, nil, 0, 4)
 	if _, _, err := second.Execute(t.Context(), "worker-2", task.ID, nil, store, followUp, nil, nil, nil, nil); err != nil {
 		t.Fatalf("second worker failed: %v", err)
@@ -160,8 +160,8 @@ func TestExperimentHandoffSurvivesNextWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	experiment := payload["experiment"].(map[string]any)
-	if experiment["execution_state"] != "executed" || experiment["observation"].(map[string]any)["state"] != "complete" {
-		t.Fatalf("second worker did not complete the saved experiment: %+v", experiment)
+	if experiment["execution_state"] != "unknown" || experiment["observation"].(map[string]any)["state"] != "incomplete" {
+		t.Fatalf("second worker changed an unexecuted experiment into completion: %+v", experiment)
 	}
 	if experiment["reference_fact_id"].(float64) != float64(factIDs[0]) {
 		t.Fatalf("observation did not cite the saved fact: %+v", experiment)
@@ -211,12 +211,12 @@ func TestExperimentHandoffDegradedPaths(t *testing.T) {
 	provider.add(toolTurn("degraded", "record_fact", map[string]any{
 		"summary": "non-HTTP scan result and invalid identity handoff",
 		"experiment": map[string]any{
-			"discovery":        "executed",
+			"discovery":        "static",
 			"identity":         map[string]any{"valid": false, "note": "fixture session expired"},
 			"normal_operation": "nmap -sV fixture",
 			"execution_state":  "blocked",
 			"blocker":          "identity expired before the authenticated request",
-			"observation":      map[string]any{"position": "tool stdout", "state": "complete"},
+			"observation":      map[string]any{"position": "tool stdout", "state": "incomplete"},
 			"references": []any{
 				map[string]any{"kind": "activity", "id": activityID},
 				map[string]any{"kind": "traffic", "id": "browser-missing"},
@@ -284,7 +284,7 @@ func TestExperimentHandoffCitesCapturedTraffic(t *testing.T) {
 	provider.add(toolTurn("cite", "record_fact", map[string]any{
 		"summary": "captured import response cited",
 		"experiment": map[string]any{
-			"execution_state": "executed",
+			"execution_state": "unknown",
 			"references":      []any{map[string]any{"kind": "traffic", "id": trafficID}},
 		},
 	})...)

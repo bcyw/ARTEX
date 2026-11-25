@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +11,7 @@ import (
 	"github.com/bcyw/artex/db"
 )
 
-// 同类上限闸（票 02：触顶拒收与引导）的入口级测试。
+// The cap limits new exploration; existing evidence remains reportable.
 // seam：report_finding 工具入口（模仿 finding_recorder_test.go 的直接
 // ts.addFinding().Call 模式），internal/testdb 临时库隔离环境。
 
@@ -35,7 +36,9 @@ func capReport(t *testing.T, ts *ToolSet, vulnclass string) string {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{
 		"vulnclass": vulnclass, "severity": "medium", "summary": "已验证的同类型产出",
-		"description": "功能与根因", "impact": "已验证影响", "remediation": "修复建议",
+		"description": fmt.Sprintf("独立处理器 %d 缺少查询结果隔离；与前述处理器使用不同校验路径", ts.writes.Findings),
+		"evidence":    fmt.Sprintf("fixture handler-%d: 本地受控跨边界结果；正常与异常输入均有独立对照", ts.writes.Findings),
+		"impact":      "已验证影响", "remediation": "修复建议",
 	})
 	res, err := ts.addFinding().Call(t.Context(), json.RawMessage(body), nil)
 	if err != nil {
@@ -54,16 +57,52 @@ func TestReportFindingSameClassCap(t *testing.T) {
 		}
 	}
 	got := capReport(t, ts, "GraphQL 滥用")
-	if strings.HasPrefix(got, "finding recorded: ") {
-		t.Fatalf("触顶后第 4 条同类 finding 未被拒收: %s", got)
+	if !strings.HasPrefix(got, "finding recorded: ") {
+		t.Fatalf("触顶后已取得的独立根因证据被拒收: %s", got)
 	}
-	for _, want := range []string{"同类上限", "补强已有 finding", "record_fact"} {
+	for _, want := range []string{"同类上限", "补强已有 finding", "停止新增探索"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("拒收文案缺少引导要素 %q: %s", want, got)
+			t.Fatalf("证据接收反馈缺少引导要素 %q: %s", want, got)
 		}
 	}
-	if notices != 3 || ts.writes.Findings != 3 {
-		t.Fatalf("触顶拒收不应计入产出或触发通知: notices=%d writes=%d", notices, ts.writes.Findings)
+	if notices != 4 || ts.writes.Findings != 4 {
+		t.Fatalf("触顶后的证据仍应持久化并通知: notices=%d writes=%d", notices, ts.writes.Findings)
+	}
+}
+
+func TestFindingCapSeparatesNewExplorationFromEvidence(t *testing.T) {
+	tools, d := capToolSet(t)
+	created, failed := callIntent(t, tools, map[string]any{"summary": "已在执行的文件读取验证", "vuln_type": "file_read"})
+	if failed {
+		t.Fatal(created)
+	}
+	owner := parseCreatedIntentID(t, created)
+	for range 3 {
+		if got := capReport(t, tools, "file_read"); !strings.HasPrefix(got, "finding recorded: ") {
+			t.Fatal(got)
+		}
+	}
+	for _, route := range []any{nil, map[string]any{"entry": "https://example.test/new-handler", "family": "file_read"}} {
+		args := map[string]any{"summary": "新增文件方向", "vuln_type": "file_read"}
+		if route != nil {
+			args["route"] = route
+		}
+		if out, failed := callIntent(t, tools, args); !failed || !strings.Contains(out, "同类上限") {
+			t.Errorf("触顶后仍创建新增探索: %s", out)
+		}
+	}
+	tools.SetOwnerNode(owner)
+	if out, f := anchorReport(t, tools, d, map[string]any{}); f != nil || !strings.Contains(out, "证据") {
+		t.Errorf("证据不足时仍接收: %s", out)
+	}
+	if out, f := anchorReport(t, tools, d, map[string]any{"vulnclass": "SQLi", "evidence": "wrong type"}); f != nil || !strings.Contains(out, "类型归属") {
+		t.Errorf("已有证据绕过了类型锚定: %s", out)
+	}
+	if out, f := anchorReport(t, tools, d, map[string]any{"evidence": "独立导出处理器：实际读取受控文件的完整内容，其他三个处理器不共享此根因"}); f == nil || f.VulnClass != "任意文件读取" {
+		t.Fatalf("已在执行的意图带回独立证据未保存: %s", out)
+	}
+	if n, _, reached := tools.srcClassCapReached("file_read"); n != 4 || !reached {
+		t.Fatalf("新证据未参与原计数: %d, %v", n, reached)
 	}
 }
 
@@ -75,8 +114,8 @@ func TestReportFindingCapAliasFolding(t *testing.T) {
 			t.Fatalf("别名写法 %q 被误拒: %s", vc, got)
 		}
 	}
-	if got := capReport(t, ts, "SQLInjection"); !strings.Contains(got, "同类上限") {
-		t.Fatalf("别名折叠共占名额未生效（第 4 条折叠写法应触顶拒收）: %s", got)
+	if got := capReport(t, ts, "SQLInjection"); !strings.HasPrefix(got, "finding recorded: ") || !strings.Contains(got, "同类上限 4/3") {
+		t.Fatalf("别名证据未保存或未累计到同一规范类型: %s", got)
 	}
 }
 
@@ -123,15 +162,14 @@ func TestReportFindingCapExcludesInvalidStatus(t *testing.T) {
 			t.Fatalf("无效状态应释放名额（第 %d 条被误拒）: %s", i+1, got)
 		}
 	}
-	if got := capReport(t, ts, "GraphQL 滥用"); !strings.Contains(got, "同类上限") {
-		t.Fatalf("释放名额后重新触顶未拒收: %s", got)
+	if got := capReport(t, ts, "GraphQL 滥用"); !strings.HasPrefix(got, "finding recorded: ") || !strings.Contains(got, "同类上限 4/3") {
+		t.Fatalf("无效状态未排除或已有证据未保存: %s", got)
 	}
 }
 
 func TestReportFindingCapMetaUnavailableNoGate(t *testing.T) {
 	// AssetStore 缺席（nil）时无法交叉 findings 表状态：按节点存在宽松计数，
-	// 同桶计数仍应触顶；绝不因 meta 不可用而放行无限上报，也不误杀（口径与
-	// findingTypeCounts 的回退方向一致：审查修复项 1）。
+	// 同桶计数仍应触顶并限制新增探索，已有证据照常保存（与类型分布口径一致）。
 	ts, _ := capToolSet(t)
 	ts.as = nil // 模拟 meta 交叉不可用
 	for i := 0; i < 3; i++ {
@@ -139,7 +177,7 @@ func TestReportFindingCapMetaUnavailableNoGate(t *testing.T) {
 			t.Fatalf("meta 不可用时第 %d 条被误拒: %s", i+1, got)
 		}
 	}
-	if got := capReport(t, ts, "GraphQL 滥用"); !strings.Contains(got, "同类上限") {
+	if got := capReport(t, ts, "GraphQL 滥用"); !strings.HasPrefix(got, "finding recorded: ") || !strings.Contains(got, "同类上限 4/3") {
 		t.Fatalf("meta 不可用时同桶计数仍应触顶（按节点存在计）: %s", got)
 	}
 }
@@ -151,8 +189,8 @@ func TestReportFindingCapIndependentClasses(t *testing.T) {
 			t.Fatalf("第 %d 条被误拒: %s", i+1, got)
 		}
 	}
-	if got := capReport(t, ts, "GraphQL 滥用"); !strings.Contains(got, "同类上限") {
-		t.Fatalf("触顶未拒收: %s", got)
+	if got := capReport(t, ts, "GraphQL 滥用"); !strings.HasPrefix(got, "finding recorded: ") || !strings.Contains(got, "同类上限 4/3") {
+		t.Fatalf("触顶后的证据接收/计数错误: %s", got)
 	}
 	// 不同类型各自计数、互不影响：另一类照常可报。
 	if got := capReport(t, ts, "缓存投毒"); !strings.HasPrefix(got, "finding recorded: ") {
@@ -175,7 +213,7 @@ func TestReportFindingCapHotLoaded(t *testing.T) {
 	if got := capReport(t, ts, "GraphQL 滥用"); !strings.HasPrefix(got, "finding recorded: ") {
 		t.Fatalf("热载上限 1 下首条被误拒: %s", got)
 	}
-	if got := capReport(t, ts, "GraphQL 滥用"); !strings.Contains(got, "同类上限") {
-		t.Fatalf("热载上限值未生效（第 2 条应拒收）: %s", got)
+	if got := capReport(t, ts, "GraphQL 滥用"); !strings.HasPrefix(got, "finding recorded: ") || !strings.Contains(got, "同类上限 2/1") {
+		t.Fatalf("热载上限值未生效或已有证据被拒: %s", got)
 	}
 }

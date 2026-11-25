@@ -11,7 +11,7 @@ func TestRecordFactPersistsOptionalExperimentContext(t *testing.T) {
 	intentID := recordFactTestIntent(t, store, "recover experiment")
 	worker := NewToolSet(store, "worker")
 	worker.SetOwnerNode(intentID)
-	input := `{"summary":"parser reached the controlled input","experiment":{"question":"does the parser consume the supplied payload?","normal_operation":"GET /import?url=fixture","identity":"authenticated fixture user","variables":["payload=fixture"],"actions":[{"state":"executed","description":"submitted the captured request"}],"observation":{"position":"response body","window":"same request","state":"complete","excerpt":"ROUTE-RECOVERY-MARKER"},"execution_state":"executed","conclusion":"controlled input reached parser","blocker":"","references":[{"kind":"traffic","id":"browser-fixture","excerpt":"response tail"}]}}`
+	input := `{"summary":"parser experiment planned","experiment":{"question":"does the parser consume the supplied payload?","normal_operation":"GET /import?url=fixture","identity":"authenticated fixture user","variables":["payload=fixture"],"actions":[{"state":"planned","description":"submit the captured request"}],"observation":{"position":"response body","window":"same request","state":"incomplete"},"execution_state":"planned","conclusion":"controlled input still needs verification","blocker":"","references":[{"kind":"traffic","id":"browser-fixture","excerpt":"response tail"}]}}`
 	result := callRecordFact(t, worker.WorkerTools(), input)
 	if result.IsError {
 		t.Fatalf("record_fact rejected experiment context: %s", result.Flatten())
@@ -29,11 +29,11 @@ func TestRecordFactPersistsOptionalExperimentContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	experiment, ok := payload["experiment"].(map[string]any)
-	if !ok || experiment["execution_state"] != "executed" || !strings.Contains(experiment["conclusion"].(string), "controlled input") {
+	if !ok || experiment["execution_state"] != "planned" || !strings.Contains(experiment["conclusion"].(string), "controlled input") {
 		t.Fatalf("experiment context was not retained: %+v", payload)
 	}
 	observation, ok := experiment["observation"].(map[string]any)
-	if !ok || observation["state"] != "complete" || observation["position"] != "response body" {
+	if !ok || observation["state"] != "incomplete" || observation["position"] != "response body" {
 		t.Fatalf("observation context was not retained: %+v", experiment)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -101,7 +102,7 @@ func (t *ToolSet) routePriority(it intentItem) (int, error) {
 		if strings.TrimSpace(it.Route.Entry) != "" && (basis == "intermediate_evidence" || basis == "controllable_input" || basis == "component_chain") {
 			for _, id := range pidList(it.ParentIDs) {
 				node, err := t.ts.GetNodeWithSources(id)
-				if err == nil && routeEvidenceSignature(node) != "" && t.routeEvidenceMatchesEntry(node, it.Route.Entry) {
+				if err == nil && routePriorityEvidence(node) && t.routeEvidenceMatchesEntry(node, it.Route.Entry) {
 					priority = 8
 					break
 				}
@@ -451,10 +452,8 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 	if t == nil || t.ts == nil {
 		return states
 	}
-	// A fact with a substantive route outcome (progress, a converged negative,
-	// a new blocker, etc.) is structured information about this route even when
-	// the planner did not enumerate a new tested variant. Empty windows and OOB
-	// service failures are observations about the harness, not route progress.
+	// Only supported observations contribute information. Plans, tested labels,
+	// outcomes and execution bookkeeping remain readable without resetting rounds.
 	information := map[string][]string{}
 	typeByRoute := map[string]string{}
 	legacyMethods := map[string]string{}
@@ -506,9 +505,6 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 			if n.State == "open" || n.State == "running" {
 				st.OpenIntents++
 			}
-		}
-		if route != nil {
-			information[st.ID] = append(information[st.ID], routeInformation(route))
 		}
 		if cap := payloadRouteCap(p); cap > 0 && (st.Cap == 0 || cap < st.Cap) {
 			st.Cap = cap
@@ -578,20 +574,13 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 			evidence, _ := p["evidence"].(string)
 			// Recovering an operation must not extend an unsupported historical
 			// conclusion's authority. All conclusive outcomes need an observation.
-			if strings.EqualFold(strings.TrimSpace(confidence), "observed") && strings.TrimSpace(evidence) != "" {
+			if strings.EqualFold(strings.TrimSpace(confidence), "observed") && strings.TrimSpace(evidence) != "" && t.hasSupportedObservation(p) {
 				st.Stopped = true
 			}
 		}
 		if r != nil {
-			information[st.ID] = append(information[st.ID], routeInformation(r))
-			if signature := routeEvidenceSignature(n); signature != "" {
+			if signature := t.routeEvidenceSignature(n); signature != "" {
 				information[st.ID] = append(information[st.ID], "evidence:"+signature)
-			}
-			if substantiveRouteOutcome(r.Outcome) {
-				// A substantive fact is information; the exact node id is not.
-				// Repeating the same outcome in a new fact must not reset the
-				// three-round no-information counter.
-				information[st.ID] = append(information[st.ID], "outcome:"+normalizeRoutePart(r.Outcome))
 			}
 		}
 	}
@@ -617,6 +606,69 @@ func (t *ToolSet) routeStates() map[string]*RouteState {
 	}
 	t.applyRouteInformationRounds(states)
 	return states
+}
+
+func factExperiments(p map[string]any) []map[string]any {
+	var experiments []map[string]any
+	if e, ok := p["experiment"].(map[string]any); ok {
+		experiments = append(experiments, e)
+	}
+	if items, ok := p["experiments"].([]any); ok {
+		for _, item := range items {
+			if e, ok := item.(map[string]any); ok {
+				experiments = append(experiments, e)
+			}
+		}
+	}
+	return experiments
+}
+
+func experimentRunInfo(e map[string]any) RunInfo {
+	var run RunInfo
+	raw, _ := json.Marshal(e["run"])
+	_ = json.Unmarshal(raw, &run)
+	return run
+}
+
+func (t *ToolSet) hasSupportedObservation(p map[string]any) bool {
+	for _, e := range factExperiments(p) {
+		if t.supportedObservation(e) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// Replay the existing host activity stamp, including after a restart. A model's
+// assertion or a readable reference alone does not prove execution. This checks
+// provenance and completeness, never the semantic truth/impact of a conclusion.
+func (t *ToolSet) supportedObservation(e map[string]any) string {
+	if t == nil || t.ts == nil || (e["execution_state"] != "executed" && e["discovery"] != "executed") {
+		return ""
+	}
+	if state, _ := e["execution_state"].(string); state != "" && state != "executed" {
+		return ""
+	}
+	for _, key := range []string{"identity", "normal_operation"} {
+		if v, ok := e[key].(map[string]any); ok && v["valid"] == false {
+			return ""
+		}
+	}
+	observation, _ := e["observation"].(map[string]any)
+	excerpt, _ := observation["excerpt"].(string)
+	if observation["state"] != "complete" || strings.TrimSpace(excerpt) == "" {
+		return ""
+	}
+	run := experimentRunInfo(e)
+	taskID, err := t.ts.TaskID()
+	if err != nil || run.RunID == "" || run.TaskID != taskID || run.ExplorationID != t.ts.ID() || run.IntentID <= 0 {
+		return ""
+	}
+	verifier := &ToolSet{ts: t.ts, runInfo: run}
+	if verifier.validateExecutionBasis(e["execution_basis"]) != nil || verifier.validateExecutionBasis(observation["basis"]) != nil {
+		return ""
+	}
+	return strings.TrimSpace(excerpt)
 }
 
 // routeForFact merges a fact's optional route block with the route inherited
@@ -756,38 +808,6 @@ func (t *ToolSet) recordRouteRound() error {
 		return err
 	}
 	return nil
-}
-
-func routeInformation(r *Route) string {
-	if r == nil {
-		return ""
-	}
-	parts := make([]string, 0, len(r.Tested)+1)
-	for _, tested := range r.Tested {
-		if k := normalizeRoutePart(tested); k != "" {
-			parts = append(parts, "tested:"+k)
-		}
-	}
-	// no_interaction and service_unavailable are observations about the OOB
-	// service or an empty window, not new information about the target route.
-	// Keep them in the fact outcome, but do not let them reset the
-	// information-free streak.
-	if substantiveRouteOutcome(r.Outcome) {
-		parts = append(parts, "outcome:"+normalizeRoutePart(r.Outcome))
-	}
-	sort.Strings(parts)
-	return strings.Join(parts, "|")
-}
-
-// substantiveRouteOutcome excludes harness observations (empty OOB window and
-// service outage) from route information gain.
-func substantiveRouteOutcome(outcome string) bool {
-	switch normalizeRoutePart(outcome) {
-	case "", "nointeraction", "serviceunavailable", "observationincomplete":
-		return false
-	default:
-		return true
-	}
 }
 
 // A confirmed route-level negative closes the route; an inconclusive variant
@@ -1010,12 +1030,11 @@ func (t *ToolSet) routeContinuation(st *RouteState, it intentItem) error {
 	}
 	if st.Intents > 0 {
 		parentIDs := pidList(it.ParentIDs)
-		hasNewTested := hasUnseenRouteValues(it.Route.Tested, st.Tested)
-		if st.InformationFree >= routeMaxInformationFree && len(parentIDs) == 0 && !hasNewTested {
-			return fmt.Errorf("路线 %s 连续 %d 轮没有新增事实/发现或新 tested 变体：必须换方向，不能再派同路线意图", st.ID, st.InformationFree)
+		if st.InformationFree >= routeMaxInformationFree && len(parentIDs) == 0 {
+			return fmt.Errorf("路线 %s 连续 %d 轮没有有执行依据的新增观察：必须换方向，不能再派同路线意图", st.ID, st.InformationFree)
 		}
-		if len(parentIDs) == 0 && !hasNewTested {
-			return fmt.Errorf("路线 %s 已有执行记录，新增意图必须带 parent_ids（此前未用于该路线的新增 fact/finding）或尚未出现过的 tested 变体；换 summary/next_step/机制拼写/意图 id 不算信息增量", st.ID)
+		if len(parentIDs) == 0 {
+			return fmt.Errorf("路线 %s 已有执行记录，新增意图必须带 parent_ids（此前未用于该路线且有执行依据和完整观察的 fact/finding）；新 tested 标签或未执行计划不算信息增量", st.ID)
 		}
 		// A continuation must be backed by a fact that is not already the basis of
 		// an earlier attempt. The parent set is the planner's structured claim of
@@ -1064,20 +1083,20 @@ func (t *ToolSet) routeContinuation(st *RouteState, it intentItem) error {
 		if len(parentIDs) > 0 {
 			consumed := map[string]bool{}
 			for id := range parents {
-				if signature := routeEvidenceSignature(evidence[id]); signature != "" {
+				if signature := t.routeEvidenceSignature(evidence[id]); signature != "" {
 					consumed[signature] = true
 				}
 			}
 			hasNew := false
 			for _, id := range parentIDs {
-				signature := routeEvidenceSignature(evidence[id])
+				signature := t.routeEvidenceSignature(evidence[id])
 				if !parents[id] && signature != "" && !consumed[signature] {
 					hasNew = true
 					break
 				}
 			}
 			if !hasNew {
-				return fmt.Errorf("续跑路线 %s 没有新增事实作依据：parent_ids 必须包含此前未用于该路线且带实质信息增量的 fact/finding（no_interaction/service_unavailable 不算）；换措辞不算信息增量", st.ID)
+				return fmt.Errorf("续跑路线 %s 没有新增事实作依据：parent_ids 必须包含此前未用于该路线且有成功执行来源和完整观察的 fact/finding（no_interaction/service_unavailable 不算）；换措辞、ID 或 tested 标签不算信息增量", st.ID)
 			}
 		}
 	}
@@ -1113,7 +1132,9 @@ func routeEvidenceIsInformative(n *db.Node) bool {
 
 // Content, not a fresh node ID, determines evidence gain. Execution bookkeeping
 // and route hypotheses are deliberately absent from the fingerprint.
-func routeEvidenceSignature(n *db.Node) string {
+var routeObservationNoise = regexp.MustCompile(`(?i)\b(?:nonce|probe(?:_id)?|correlation_id|timestamp)\s*[:=]\s*[^\s,;]+`)
+
+func (t *ToolSet) routeEvidenceSignature(n *db.Node) string {
 	if !routeEvidenceIsInformative(n) {
 		return ""
 	}
@@ -1121,27 +1142,34 @@ func routeEvidenceSignature(n *db.Node) string {
 	if json.Unmarshal(n.Payload, &p) != nil || isInferredFact(p) {
 		return ""
 	}
-	content := map[string]any{}
-	for _, key := range []string{"evidence", "proof"} {
-		if value, ok := p[key]; ok && value != nil && value != "" {
-			content[key] = value
+	var content []string
+	for _, e := range factExperiments(p) {
+		observation := routeObservationNoise.ReplaceAllString(t.supportedObservation(e), "")
+		if observation = strings.Join(strings.Fields(observation), " "); observation != "" {
+			content = appendUnique(content, observation)
 		}
 	}
 	if len(content) == 0 {
 		return ""
 	}
+	sort.Strings(content)
 	raw, _ := json.Marshal(content)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:16])
 }
 
-func hasUnseenRouteValues(candidate, existing []string) bool {
-	seen := map[string]bool{}
-	for _, v := range existing {
-		seen[normalizeRoutePart(v)] = true
+// Priority can rank existing evidence without granting another execution.
+// Continuation and conclusive stops apply the stronger provenance check above.
+func routePriorityEvidence(n *db.Node) bool {
+	if !routeEvidenceIsInformative(n) {
+		return false
 	}
-	for _, v := range candidate {
-		if k := normalizeRoutePart(v); k != "" && !seen[k] {
+	p, err := payloadMap(n.Payload)
+	if err != nil || isInferredFact(p) {
+		return false
+	}
+	for _, key := range []string{"evidence", "proof"} {
+		if value, _ := p[key].(string); strings.TrimSpace(value) != "" {
 			return true
 		}
 	}

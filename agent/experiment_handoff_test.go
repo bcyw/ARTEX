@@ -32,7 +32,7 @@ func TestRecordFactCarriesMultipleExperiments(t *testing.T) {
 	worker := NewToolSet(store, "worker")
 	worker.SetOwnerNode(intentID)
 	input := `{"summary":"two distinguishable experiments","experiments":[
-		{"question":"normal operation baseline","execution_state":"executed","observation":{"state":"complete","position":"response body"}},
+		{"question":"normal operation baseline","execution_state":"unknown","observation":{"state":"unknown","position":"response body"}},
 		{"question":"delayed trigger","execution_state":"planned","observation":{"state":"incomplete"}}
 	]}`
 	if result := callRecordFact(t, worker.WorkerTools(), input); result.IsError {
@@ -107,12 +107,8 @@ func TestRecordFactRequiresBasisBeforeClaimingProbeSent(t *testing.T) {
 		t.Fatalf("claiming a sent probe without a basis should be rejected: %s", result.Flatten())
 	}
 	withBasis := `{"summary":"probe sent and traceable","experiment":{"probe":{"allocated":true,"send_state":"sent","send_basis":{"kind":"activity","id":` + strconv.FormatInt(activityID, 10) + `}}}}`
-	if result := callRecordFact(t, worker.WorkerTools(), withBasis); result.IsError {
-		t.Fatalf("probe with a real activity basis was rejected: %s", result.Flatten())
-	}
-	probe := factPayload(t, store, intentID)["experiment"].(map[string]any)["probe"].(map[string]any)
-	if probe["send_state"] != "sent" || probe["send_basis"].(map[string]any)["verified"] != true {
-		t.Fatalf("probe send basis was not recorded as verified: %+v", probe)
+	if result := callRecordFact(t, worker.WorkerTools(), withBasis); !result.IsError {
+		t.Fatalf("legacy material without host execution provenance proved a send: %s", result.Flatten())
 	}
 
 	// A traffic id the host cannot resolve is not a send basis: without a verifier

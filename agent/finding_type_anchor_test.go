@@ -170,7 +170,7 @@ func TestReportFindingUnknownTypeAllowed(t *testing.T) {
 }
 
 // TestReportFindingCanonicalTypeSharesCap 规范名落库后与同类上限闸协同：别名
-// 写法归入同一桶，共占名额（第 4 条折叠写法触顶拒收）。
+// 写法归入同一桶；触顶影响探索，不单独拒绝已有证据。
 func TestReportFindingCanonicalTypeSharesCap(t *testing.T) {
 	ts, d := typeAnchorToolSet(t)
 	for i, vc := range []string{"SQL 注入", "sqli", "sql_injection"} {
@@ -178,9 +178,9 @@ func TestReportFindingCanonicalTypeSharesCap(t *testing.T) {
 			t.Fatalf("第 %d 条别名写法被误拒: %s", i+1, got)
 		}
 	}
-	got, f := anchorReport(t, ts, d, map[string]any{"vulnclass": "SQLInjection"})
-	if f != nil {
-		t.Fatalf("别名折叠未共占名额（第 4 条折叠写法应触顶）: %s", got)
+	got, f := anchorReport(t, ts, d, map[string]any{"vulnclass": "SQLInjection", "evidence": "fixture: 第四个独立查询拼接路径的正常对照与真实数据结果"})
+	if f == nil || f.VulnClass != "注入类" {
+		t.Fatalf("触顶后独立证据未沿规范类型保存: %s", got)
 	}
 	if !strings.Contains(got, "同类上限") {
 		t.Fatalf("触顶文案缺少引导: %s", got)

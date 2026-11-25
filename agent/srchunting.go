@@ -178,7 +178,7 @@ func parseCollect(v string) bool {
 //   - Types：全部条目规范名清单，按目录书写序（可收类型在前、不收类型在后）；
 //   - Fold：归一后别名 → 规范名的折叠映射（规范名自身也是键）；
 //   - Cap：同类上限——单任务内同一规范类型有效产出（pending + confirmed）
-//     的数量上限，触顶即拒收该类型新 finding（见目录文案）。
+//     触发的探索投入上限，触顶停止新增探索（已有独立根因证据仍可登记）。
 type srcHuntingFocus struct {
 	Types []string
 	Fold  map[string]string

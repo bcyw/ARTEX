@@ -7,10 +7,10 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/bcyw/artex/db"
-	"github.com/bcyw/artex/internal/toolrun"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/bcyw/artex/db"
+	"github.com/bcyw/artex/internal/toolrun"
 )
 
 func (t *ToolSet) verifyGoal(goal, ev *db.Node) error {
@@ -117,6 +117,18 @@ type workerFinalizer struct {
 }
 
 func (f *workerFinalizer) PreToolUse(ctx context.Context, n string, in []byte) (bool, string, []byte) {
+	name := n
+	if n == "ExecuteExtraTool" {
+		var call struct {
+			Name string `json:"tool_name"`
+		}
+		if json.Unmarshal(in, &call) == nil {
+			name = call.Name
+		}
+	}
+	if f.retries > 0 && (name == "Bash" || name == "WebFetch" || name == "oob_generate" || strings.HasPrefix(name, "mcp__") || strings.HasPrefix(name, "recipe__")) {
+		return true, "当前正在结束收束，不能发起新探测；请读取已有结果、wait/cancel 或写回具体 blocker", nil
+	}
 	if f.base != nil {
 		return f.base.PreToolUse(ctx, n, in)
 	}
@@ -148,9 +160,7 @@ func (f *workerFinalizer) Stop(ctx context.Context, msgs []llm.Message) (bool, [
 	if ctx.Err() != nil {
 		return false, nil, ""
 	}
-	pending := f.runs != nil && f.runs.Pending() > 0
-	missing := f.probed.Load() && f.tools.Writes().Total() == 0
-	if !pending && !missing {
+	if !f.incomplete() {
 		return false, nil, ""
 	}
 	if f.retries >= 2 {
@@ -158,5 +168,70 @@ func (f *workerFinalizer) Stop(ctx context.Context, msgs []llm.Message) (bool, [
 		return true, nil, "终态验收未通过：后台工具未收束或探测结论未写回"
 	}
 	f.retries++
-	return false, []string{"结束前请 wait/cancel 尚在运行的工具；把已有结果或失败原因用 record_fact 写回图谱。不要为凑证据发起新探测，不要编造发现。"}, ""
+	return false, []string{"结束前请 wait/cancel 尚在运行的工具；用 record_fact 写回本 run、当前 intent 的实验结论或具体 blocker。已执行结论需 experiment.conclusion、成功工具 activity 的 execution_basis 与完整 observation（basis、excerpt）；缺材料时保留 blocked/unknown、incomplete 与具体 blocker。资产、旧 run 结论和自动空 OOB 不能替代当前技术研究结论。不要为凑证据发起新探测，不要编造发现。"}, ""
+}
+
+// The SDK skips a repeated stop hook if the model answers a nudge with text
+// alone. Worker.Execute also checks this on ReasonCompleted before accepting it.
+func (f *workerFinalizer) incomplete() bool {
+	if f.runs != nil && f.runs.Pending() > 0 {
+		return true
+	}
+	if f.tools.technicalResearchIntent() {
+		return !f.tools.currentRunConclusion()
+	}
+	return f.probed.Load() && f.tools.Writes().Total() == 0
+}
+
+func (t *ToolSet) technicalResearchIntent() bool {
+	if t == nil || t.ts == nil || t.ownerNode <= 0 {
+		return false
+	}
+	intent, err := t.ts.GetNode(t.ownerNode)
+	if err != nil || intent == nil || intent.Kind != db.KindIntent {
+		return false
+	}
+	p, err := payloadMap(intent.Payload)
+	if err != nil {
+		return false
+	}
+	vulnType, _ := p["vuln_type"].(string)
+	return strings.TrimSpace(vulnType) != "" || routeIdentityFor(routeFromPayload(p)) != ""
+}
+
+func (t *ToolSet) currentRunConclusion() bool {
+	// report_finding is already current-worker-owned and validates its evidence;
+	// this count belongs to the ToolSet created for this invocation only.
+	if t.Writes().Findings > 0 {
+		return true
+	}
+	ids, err := t.ts.FactsYielded(t.ownerNode)
+	if err != nil || t.runInfo.RunID == "" {
+		return false
+	}
+	for _, id := range ids {
+		node, err := t.ts.GetNode(id)
+		if err != nil || node == nil {
+			continue
+		}
+		p, err := payloadMap(node.Payload)
+		if err != nil {
+			continue
+		}
+		for _, e := range factExperiments(p) {
+			run := experimentRunInfo(e)
+			if run.RunID != t.runInfo.RunID || run.IntentID != t.ownerNode || run.TaskID != t.runInfo.TaskID || run.ExplorationID != t.runInfo.ExplorationID {
+				continue
+			}
+			blocker, _ := e["blocker"].(string)
+			if (e["execution_state"] == "blocked" || e["execution_state"] == "unknown") && strings.TrimSpace(blocker) != "" {
+				return true
+			}
+			conclusion, _ := e["conclusion"].(string)
+			if strings.TrimSpace(conclusion) != "" && t.supportedObservation(e) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }

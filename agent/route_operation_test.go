@@ -120,7 +120,7 @@ func TestOperationHandoffKeepsWorkerAndPlannerContext(t *testing.T) {
 				"summary": "operation context is available; observation remains planned",
 				// An older worker can repeat the route without the new optional fields.
 				"route":      map[string]any{"entry": tc.entry, "family": "parser"},
-				"experiment": map[string]any{"method": tc.method, "input_location": tc.selector, "execution_state": "planned"},
+				"experiment": map[string]any{"method": tc.method, "input_location": tc.selector, "execution_state": "blocked", "blocker": "the fixture response for this operation is unavailable"},
 			})...)
 			provider.add(textTurn("handoff saved")...)
 			taskID, _ := tools.ts.TaskID()
@@ -155,14 +155,9 @@ func TestOperationRefinementPreservesLegacyStop(t *testing.T) {
 		t.Fatal(created.Flatten())
 	}
 	id := parseCreatedIntentID(t, created.Flatten())
-	worker := NewToolSet(tools.ts, "worker")
-	worker.SetOwnerNode(id)
-	stop := operationTool(t, worker.WorkerTools(), "record_fact", map[string]any{
+	routeObservationFact(t, tools, id, map[string]any{
 		"summary": "legacy route completed", "outcome": "negative", "confidence": "observed", "evidence": "controlled normal and variant responses match",
 	})
-	if stop.IsError {
-		t.Fatal(stop.Flatten())
-	}
 	out := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{
 		"summary": "refined name does not erase previous stop",
 		"route":   map[string]any{"entry": base["entry"], "family": base["family"], "method": "POST", "input_location": "body:other", "component": "renamed"},
@@ -233,12 +228,12 @@ func TestOperationRefinementDoesNotPromoteUnsupportedLegacyStops(t *testing.T) {
 				if err := tools.ts.Link(intentID, db.RelYields, factID); err != nil {
 					t.Fatal(err)
 				}
-				fresh, err := tools.ts.AddNode(db.KindFact, map[string]any{
-					"summary": "new discriminator", "confidence": "observed", "evidence": "fixture response: new input handler selected",
-				}, 5, "confirmed", "worker", nil)
-				if err != nil {
-					t.Fatal(err)
+				if tc.wantStop {
+					routeObservationFact(t, tools, intentID, map[string]any{"summary": "supported historical conclusion", "outcome": outcome, "confidence": tc.confidence, "evidence": tc.evidence})
 				}
+				fresh := routeObservationFact(t, tools, 0, map[string]any{
+					"summary": "new discriminator", "confidence": "observed", "evidence": "fixture response: new input handler selected",
+				})
 				out := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{
 					"summary": "refine with a new observation", "parent_ids": []int64{fresh},
 					"route": map[string]any{"entry": base["entry"], "family": base["family"], "method": "POST", "input_location": "body:id"},
@@ -379,12 +374,7 @@ func checkOperationLegacyConsumptionAfterReopen(t *testing.T, anchoredMethod boo
 		t.Fatal(created.Flatten())
 	}
 	id := parseCreatedIntentID(t, created.Flatten())
-	worker := NewToolSet(tools.ts, "worker")
-	worker.SetOwnerNode(id)
-	result := operationTool(t, worker.WorkerTools(), "record_fact", map[string]any{"summary": "saved control response", "confidence": "observed", "evidence": "control response token=legacy"})
-	if result.IsError {
-		t.Fatal(result.Flatten())
-	}
+	routeObservationFact(t, tools, id, map[string]any{"summary": "saved control response", "confidence": "observed", "evidence": "control response handler=legacy"})
 	facts, err := tools.ts.FactsYielded(id)
 	if err != nil || len(facts) != 1 {
 		t.Fatalf("facts: %v %v", facts, err)
@@ -439,10 +429,7 @@ func checkOperationLegacyConsumptionAfterReopen(t *testing.T, anchoredMethod boo
 		}
 	}
 	// New evidence remains usable; conservative recovery must not ban refinement.
-	fresh, err := tools.ts.AddNode(db.KindFact, map[string]any{"summary": "new control response", "confidence": "observed", "evidence": "control response token=fresh"}, 5, "confirmed", "fixture", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fresh := routeObservationFact(t, tools, 0, map[string]any{"summary": "new control response", "confidence": "observed", "evidence": "control response handler=fresh"})
 	out := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "refine with new observation", "route": base, "parent_ids": []int64{fresh}})
 	if out.IsError {
 		t.Fatalf("new evidence was rejected after recovery: %s", out.Flatten())
@@ -468,12 +455,7 @@ func TestOperationContinuationCannotIncreaseSharedCapAfterReopen(t *testing.T) {
 		t.Fatal(created.Flatten())
 	}
 	id := parseCreatedIntentID(t, created.Flatten())
-	worker := NewToolSet(tools.ts, "worker")
-	worker.SetOwnerNode(id)
-	result := operationTool(t, worker.WorkerTools(), "record_fact", map[string]any{"summary": "parser response", "confidence": "observed", "evidence": "parser rejected the control at byte 12"})
-	if result.IsError {
-		t.Fatal(result.Flatten())
-	}
+	routeObservationFact(t, tools, id, map[string]any{"summary": "parser response", "confidence": "observed", "evidence": "parser rejected the control at byte 12"})
 	facts, err := tools.ts.FactsYielded(id)
 	if err != nil || len(facts) != 1 {
 		t.Fatalf("handoff: %v %v", facts, err)
@@ -520,12 +502,7 @@ func TestOperationConcurrentAdmissionSharesLegacyAndRerunBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyWorker := NewToolSet(tools.ts, "worker")
-	legacyWorker.SetOwnerNode(legacyID)
-	observed := operationTool(t, legacyWorker.WorkerTools(), "record_fact", map[string]any{"summary": "operation discriminator observed", "confidence": "observed", "evidence": "fixture selector maps to the POST body handler"})
-	if observed.IsError {
-		t.Fatal(observed.Flatten())
-	}
+	routeObservationFact(t, tools, legacyID, map[string]any{"summary": "operation discriminator observed", "confidence": "observed", "evidence": "fixture selector maps to the POST body handler"})
 	legacyFacts, err := tools.ts.FactsYielded(legacyID)
 	if err != nil || len(legacyFacts) != 1 {
 		t.Fatalf("legacy handoff: %v %v", legacyFacts, err)
@@ -540,12 +517,7 @@ func TestOperationConcurrentAdmissionSharesLegacyAndRerunBudget(t *testing.T) {
 	if err := tools.ts.SetIntentState(id, "done"); err != nil {
 		t.Fatal(err)
 	}
-	worker := NewToolSet(tools.ts, "worker")
-	worker.SetOwnerNode(id)
-	result := operationTool(t, worker.WorkerTools(), "record_fact", map[string]any{"summary": "observed input handler", "confidence": "observed", "evidence": "fixture parser state: type=text"})
-	if result.IsError {
-		t.Fatal(result.Flatten())
-	}
+	routeObservationFact(t, tools, id, map[string]any{"summary": "observed input handler", "confidence": "observed", "evidence": "fixture parser state: type=text"})
 	facts, err := tools.ts.FactsYielded(id)
 	if err != nil || len(facts) != 1 {
 		t.Fatalf("handoff: %v %v", facts, err)

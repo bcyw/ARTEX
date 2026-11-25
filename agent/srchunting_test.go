@@ -24,7 +24,7 @@ func TestHuntingFocusGuidanceInjection(t *testing.T) {
 	}
 }
 
-// TestSrcTypeCatalogDefaults 锁机器可查目录的默认值：8 个 collect: yes 类型
+// TestSrcTypeCatalogDefaults 锁机器可查目录的默认值：11 个 collect: yes 类型
 // 按书写序在前、明确不收类型在后，同类上限默认 3，每条都有证明物、
 // collect: no 条目都有止损文案（上报被拒时引用）。
 func TestSrcTypeCatalogDefaults(t *testing.T) {
@@ -32,6 +32,7 @@ func TestSrcTypeCatalogDefaults(t *testing.T) {
 	wantCollect := []string{
 		"注入类", "命令执行与反序列化", "SSRF", "认证绕过与账户接管",
 		"存储型 XSS", "文件上传 getshell", "业务逻辑", "越权",
+		"任意文件读取", "任意文件写入", "敏感数据泄露",
 	}
 	if c.Cap != 3 {
 		t.Errorf("同类上限 = %d, want 3", c.Cap)

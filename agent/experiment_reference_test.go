@@ -17,7 +17,7 @@ func TestRecordFactValidatesGraphExperimentReferences(t *testing.T) {
 	}
 	worker := NewToolSet(store, "worker")
 	worker.SetOwnerNode(intentID)
-	valid := fmt.Sprintf(`{"summary":"reference is available","experiment":{"execution_state":"executed","references":[{"kind":"node","id":%d,"excerpt":"captured baseline"}]}}`, referenceID)
+	valid := fmt.Sprintf(`{"summary":"reference is available","experiment":{"execution_state":"unknown","references":[{"kind":"node","id":%d,"excerpt":"captured baseline"}]}}`, referenceID)
 	if result := callRecordFact(t, worker.WorkerTools(), valid); result.IsError {
 		t.Fatalf("existing node reference should be accepted: %s", result.Flatten())
 	}

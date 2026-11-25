@@ -7,8 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-
-	"github.com/bcyw/artex/db"
 )
 
 func TestRouteBudgetSharedAcrossParameters(t *testing.T) {
@@ -67,10 +65,7 @@ func TestContinueIntentIdentityAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := tools.ts.GetNode(id)
-	fact, err := tools.ts.AddNode(db.KindFact, map[string]any{"summary": "observed parser response", "evidence": "parser response: unexpected token at 12", "confidence": "observed"}, 5, "confirmed", "worker", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fact := routeObservationFact(t, tools, 0, map[string]any{"summary": "observed parser response", "evidence": "parser response: unexpected token at 12", "confidence": "observed"})
 	tools.SetContinueWork(func(int64, string) error { return fmt.Errorf("queue unavailable") })
 	call := func(r map[string]any) string {
 		raw, _ := json.Marshal(map[string]any{"intent_id": id, "message": "new evidence", "parent_ids": []int64{fact}, "route": r})
@@ -98,11 +93,7 @@ func TestRouteEvidenceContentDrivesContinuation(t *testing.T) {
 	count := 0
 	fact := func(detail string) int64 {
 		count++
-		id, err := tools.ts.AddNode(db.KindFact, map[string]any{"summary": fmt.Sprintf("callback %d", count), "detail": "reworded explanation", "evidence": detail, "confidence": "observed", "outcome": "progress", "route": route}, 5, "confirmed", "worker", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return id
+		return routeObservationFact(t, tools, 0, map[string]any{"summary": fmt.Sprintf("callback %d", count), "detail": "reworded explanation", "evidence": detail, "confidence": "observed", "outcome": "progress", "route": route})
 	}
 	first := fact("DNS probe=a remote=192.0.2.1")
 	out, failed := callIntent(t, tools, map[string]any{"summary": "initial", "route": route, "parent_ids": []int64{first}})
@@ -151,13 +142,9 @@ func TestRouteTopLevelOutcomeStopsInheritedRoute(t *testing.T) {
 				t.Fatal(out)
 			}
 			id := parseCreatedIntentID(t, out)
-			raw, _ := json.Marshal(map[string]any{"intent_id": id, "summary": "conclusive result", "confidence": "observed", "evidence": "request/response proof", "outcome": outcome})
-			res, err := tools.recordFact().Call(t.Context(), raw, nil)
-			if err != nil || res.IsError {
-				t.Fatalf("record: %v %s", err, res.Flatten())
-			}
+			routeObservationFact(t, tools, id, map[string]any{"intent_id": id, "summary": "conclusive result", "confidence": "observed", "evidence": "request/response proof", "outcome": outcome})
 			out, failed = callIntent(t, tools, map[string]any{"summary": "retry", "route": map[string]any{"entry": route["entry"], "family": route["family"], "tested": []string{"new variant"}}})
-			if !failed {
+			if !failed || !strings.Contains(out, "停止") {
 				t.Fatal("terminal route accepted:", out)
 			}
 		})

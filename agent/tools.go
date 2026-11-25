@@ -117,6 +117,8 @@ type ToolSet struct {
 	// material) against its owning store and returns a compact excerpt. nil = such
 	// references stay unverified instead of being trusted on the model's word.
 	verifyReference func(kind, id string) (excerpt string, ok bool)
+	verifyProbe     func(id string) bool
+	runInfo         RunInfo // set by Worker.execute, never from tool arguments
 }
 
 // SetReferenceVerifier wires the host-side checker for non-graph experiment
@@ -1327,6 +1329,9 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 			}
 			return 0, fmt.Errorf("意图类型「%s」按 SRC 收取标准明确不收：%s。不要为它建意图——请改用 record_fact 记录本次观察，或从当前可收类型里另选方向：%s", entry.Name, stop, strings.Join(collectableNames(catalog), "、"))
 		}
+		if n, limit, reached := t.srcClassCapReached(entry.Name); reached {
+			return 0, fmt.Errorf("同类上限触顶：类型「%s」有效产出 %d/%d，停止新增探索；已取得的独立根因证据仍可 report_finding，同根因材料补强已有 finding", entry.Name, n, limit)
+		}
 		payload["vuln_type"] = entry.Name
 		payload["proof"] = entry.Proof
 		if proof := strings.TrimSpace(it.Proof); proof != "" {
@@ -1531,10 +1536,10 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 // --- worker write tools ---
 
 func (t *ToolSet) addFinding() actool.CoreTool {
-	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。description / impact / remediation 按交付报告文体填写：直接描述功能与根因、已验证的影响、可执行的修复，不写工具名、检索过程或“未绑定流量”之类的过程说明。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
+	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。先查 list_findings：同根因补强已有 finding，独立根因在 description 说明不同成因，并在 evidence/traffic_refs 提供实际支撑；新 URL、名称或严重度不是独立依据。同类上限停止新增探索，不单独拒绝已有独立根因证据。description / impact / remediation 按交付报告文体填写：直接描述功能与根因、已验证的影响、可执行的修复，不写工具名、检索过程或“未绑定流量”之类的过程说明。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
 		"vulnclass": str("可选：漏洞类别；省略时取当前意图的 vuln_type，填写时须与意图类型一致"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要（工作记录，不是报告正文）"),
-		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
-		"evidence":         str("证据/PoC 文本：精选最能证明漏洞的关键片段（≤20 行），完整请求/响应报文应通过 traffic_refs 绑定流量记录，不在 evidence 里整段倾倒"),
+		"intent_id": idp("当前任务的意图 id；worker 省略时采用本轮意图，不能改指其他意图"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
+		"evidence":         str("证据/PoC 文本：保留复现所需的身份前提、完整操作顺序、延迟触发与关键观察，不受预览行数限制。已有核实的 HTTP 抓包且绑定可用时，可选用 traffic_refs 保存完整请求/响应；未抓包、关闭绑定或非 HTTP 时直接保留完整 PoC、命令与输出，不为补包重新探测"),
 		"description":      str("漏洞描述（交付文体）：功能如何工作、根因、攻击者能做什么；写已验证事实，不写过程旁白；全文 ≤200 字"),
 		"impact":           str("漏洞危害（交付文体）：已验证的数据/权限影响，分条量化"),
 		"remediation":      str("修复建议（交付文体）：可执行的参数级修复，分条"),
@@ -1563,35 +1568,36 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if !db.ValidSeverity(a.Severity) {
 			return actool.Errorf("severity 必须为 critical / high / medium / low 之一（按 SRC 定级纪律选择：拿不准降级不升级）"), nil
 		}
-		// 类型归属校验（票 01，取代旧版 SRC 黑名单硬闸）：目录（~~~types）是
-		// 类型归属唯一机器来源。规则①意图锚定：worker 当前意图（ownerNode，
-		// 意图节点）的类型是硬锚——省略 intent_id 时沿用其类型，显式填写须与它
-		// 同桶，改指其他意图也不能绕过；无当前意图时按传入 intent_id 兜底。
-		// 规则②范围规则：collect:false 明确拒收并引用其 stop 文案；规则③目录外
-		// 未知类型放行（词表不堵死新类型）。校验通过后落库统一用规范名。
+		intentID, err := factIntentID(a.IntentID)
+		if err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		if t.ownerNode > 0 {
+			owner, err := t.ts.GetNode(t.ownerNode)
+			if err != nil || owner == nil {
+				return actool.Errorf("intent_id 无法校验：当前运行的归属节点不可用"), nil
+			}
+			if owner.Kind == db.KindIntent {
+				if intentID != 0 && intentID != owner.ID {
+					return actool.Errorf("intent_id 必须是当前 worker 的意图"), nil
+				}
+				intentID = owner.ID
+			}
+		}
+		// The assigned intent is the type anchor, even when it is untyped. Never
+		// borrow another intent's type or attach the finding to a different task.
 		catalog := srcCatalog()
 		vulnClass := a.VulnClass
 		intentType, intentProof := "", ""
-		resolveIntentType := func(id int64) {
-			if intentType != "" {
-				return
+		if intentID > 0 {
+			node, err := t.ts.GetNode(intentID)
+			if err != nil || node == nil || node.Kind != db.KindIntent {
+				return actool.Errorf("intent_id 必须是本任务的意图节点"), nil
 			}
-			if node, err := t.ts.GetNodeWithSources(id); err == nil && node != nil && node.Kind == db.KindIntent {
-				var ip map[string]any
-				if json.Unmarshal(node.Payload, &ip) == nil {
-					if v, _ := ip["vuln_type"].(string); v != "" {
-						intentType = v
-						intentProof, _ = ip["proof"].(string)
-					}
-				}
-			}
-		}
-		if t.ownerNode > 0 {
-			resolveIntentType(t.ownerNode)
-		}
-		if intentType == "" {
-			if iid := pid(a.IntentID); iid > 0 {
-				resolveIntentType(iid)
+			var ip map[string]any
+			if json.Unmarshal(node.Payload, &ip) == nil {
+				intentType, _ = ip["vuln_type"].(string)
+				intentProof, _ = ip["proof"].(string)
 			}
 		}
 		if intentType != "" {
@@ -1612,14 +1618,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if entry, ok := catalog.lookup(vulnClass); ok {
 			vulnClass = entry.Name
 		}
-		// 同类上限闸：单任务内单一漏洞类型的有效产出（pending+confirmed）触顶即
-		// 拒收并引导转向；上限值与折叠词表均在热载标准文件维护（见 finding_cap.go
-		// 与 srchunting.go），代码不含类型词表常量（ADR-0004）。归属校验通过的类型
-		// 才参与计数，两个闸互不干扰。
-		if n, limit, reached := t.srcClassCapReached(vulnClass); reached {
-			return actool.Errorf(fmt.Sprintf("同类上限触顶：本任务该类型（%s）有效产出已达 %d/%d，不再接收新 finding。请补强已有 finding（追加证据与影响面，同根因不另立新报），或改用 record_fact 记录本次观察，并把探索方向转向其他未触顶类型", vulnClass, n, limit)), nil
-		}
-		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: vulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs),
+		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: intentID, VulnClass: vulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs),
 			Description: a.Description, Impact: a.Impact, Remediation: a.Remediation, Session: a.Session}
 		// Auto-binding off: ignore the evidence params instead of rejecting the call.
 		// stripTrafficParameters already removes them from the advertised schema, but
@@ -1635,6 +1634,12 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		refs, err := t.findingRefsFromHint(pid(a.EvidenceHintID), a.TrafficRefs)
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
+		}
+		// ADR-0007: a full type stops exploration, not the receipt of evidence
+		// already obtained. Root-cause independence is explained in the existing
+		// description/evidence fields; never infer it from labels or URL strings.
+		if _, _, reached := t.srcClassCapReached(vulnClass); reached && strings.TrimSpace(a.Evidence) == "" && len(refs) == 0 {
+			return actool.Errorf("同类上限已触顶：已有独立根因发现仍可登记，但须在 description 说明不同成因，并用 evidence 或已核实的 traffic_refs 保留支撑证据；仅新名称/URL/严重度不够。同根因请补强已有 finding，线索用 record_fact"), nil
 		}
 		var recorded *db.RecordedFinding
 		if t.findingRecorder != nil {
@@ -1664,9 +1669,13 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		}
 		result := struct {
 			*db.RecordedFinding
-			EvidenceStatus string `json:"evidence_status"`
-			EvidenceNote   string `json:"evidence_note,omitempty"`
+			EvidenceStatus  string `json:"evidence_status"`
+			EvidenceNote    string `json:"evidence_note,omitempty"`
+			ExplorationNote string `json:"exploration_note,omitempty"`
 		}{RecordedFinding: recorded, EvidenceStatus: "bound"}
+		if n, limit, reached := t.srcClassCapReached(vulnClass); reached {
+			result.ExplorationNote = fmt.Sprintf("同类上限 %d/%d：证据已保存，停止新增探索；同根因请补强已有 finding，接收证据不重开停止路线", n, limit)
+		}
 		if len(recorded.Traffic.Bindings) == 0 {
 			result.EvidenceStatus = "not_bound"
 			result.EvidenceNote = "漏洞已保存，未绑定流量。TCP/无包情形可正常继续；若已有核实的 HTTP 流量，请用可用的 bind_finding_traffic 或漏洞页面补绑，再完成证据交接。不要重复创建漏洞。"
@@ -1755,7 +1764,10 @@ func (t *ToolSet) validateExperiment(experiment map[string]any) error {
 			return err
 		}
 	}
-	return t.validateExperimentReferences(experiment)
+	if err := t.validateExperimentReferences(experiment); err != nil {
+		return err
+	}
+	return t.validateExperimentExecution(experiment)
 }
 
 func validExperimentDiscovery(discovery string) bool {
@@ -1782,7 +1794,7 @@ func validActionState(state string) bool {
 
 // validateExperimentProbe keeps "allocated", "sent by an identified trigger" and
 // "script sent, unknown" separately representable. Claiming a send requires a
-// real, verified basis (an activity or traffic reference); a probe that was never
+// host-completed activity in this run; a probe that was never
 // allocated cannot claim any send state at all.
 func (t *ToolSet) validateExperimentProbe(raw any) error {
 	probe, ok := raw.(map[string]any)
@@ -1790,6 +1802,9 @@ func (t *ToolSet) validateExperimentProbe(raw any) error {
 		return fmt.Errorf("experiment.probe 必须是对象")
 	}
 	allocated, _ := probe["allocated"].(bool)
+	probeID, _ := probe["probe_id"].(string)
+	owned := t.verifyProbe != nil && probeID != "" && t.verifyProbe(probeID)
+	probe["allocation_verified"] = owned
 	state, _ := probe["send_state"].(string)
 	switch state {
 	case "", "allocated_only", "sent", "script_unknown", "blocked":
@@ -1803,20 +1818,17 @@ func (t *ToolSet) validateExperimentProbe(raw any) error {
 		return fmt.Errorf("experiment.probe 未 allocated 时不能声明发送状态")
 	}
 	if state != "sent" {
-		return nil
+		return t.validateExperimentBasis(probe["send_basis"], false)
 	}
 	basis, ok := probe["send_basis"].(map[string]any)
 	if !ok || len(basis) == 0 {
 		return fmt.Errorf("experiment.probe.send_state=sent 需要 send_basis（实际触发请求或工具步骤）")
 	}
-	if err := t.validateExperimentReferences(map[string]any{"references": []any{basis}}); err != nil {
-		return fmt.Errorf("send_basis: %w", err)
+	if err := t.validateExecutionBasis(basis); err != nil {
+		return fmt.Errorf("experiment.probe.send_basis 无法验证: %w", err)
 	}
-	// Only a basis the host actually resolved may prove a send. Without a
-	// verifier (or for material refs, which have none yet) it stays unverified
-	// and must not be upgraded by the model's own claim.
-	if verified, _ := basis["verified"].(bool); !verified {
-		return fmt.Errorf("experiment.probe.send_basis 无法验证：请引用已存在的活动步骤或已捕获流量")
+	if !owned {
+		return fmt.Errorf("experiment.probe.send_state=sent 需要本 run 的有效 probe_id；请用 oob_generate 分配")
 	}
 	return nil
 }
@@ -1836,6 +1848,10 @@ func (t *ToolSet) validateExperimentReferences(experiment map[string]any) error 
 			return fmt.Errorf("experiment.references 必须是对象数组")
 		}
 		kind, _ := ref["kind"].(string)
+		// These fields are host-owned, including on references to old material.
+		for _, key := range []string{"verified", "provenance", "relation", "run", "inherited", "source_task_id", "excerpt"} {
+			delete(ref, key)
+		}
 		verified := false
 		switch kind {
 		case "node":
@@ -1857,21 +1873,28 @@ func (t *ToolSet) validateExperimentReferences(experiment map[string]any) error 
 				}
 			}
 			verified = true
+			ref["relation"] = "same_task"
+			if node.Inherited {
+				inheritedMap(ref, node.SourceTaskID)
+				ref["relation"] = "inherited"
+			}
 		case "activity":
 			value, ok := ref["id"].(float64)
 			if !ok || value <= 0 || value != math.Trunc(value) {
 				return fmt.Errorf("experiment reference id 无效")
 			}
-			activities, err := t.ts.ActivityByIDsWithSources([]int64{int64(value)})
+			activity, err := t.executionActivity(int64(value))
 			if err != nil {
 				return err
 			}
-			if len(activities) == 0 {
+			if activity == nil {
 				return fmt.Errorf("experiment reference 不存在或不可用")
 			}
-			ref["excerpt"] = firstLine(activities[0].Summary, 160)
+			ref["excerpt"] = firstLine(activity.Summary, 160)
+			t.activityProvenance(*activity, ref)
 			verified = true
 		case "traffic", "material":
+			ref["relation"] = "unknown"
 			id, ok := ref["id"].(string)
 			if !ok || strings.TrimSpace(id) == "" {
 				return fmt.Errorf("experiment reference id 无效")
@@ -2025,7 +2048,7 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 			"asset_ids":   map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产"},
 			"route":       routeSchema(),
 			"outcome":     map[string]any{"type": "string", "description": "本步路线结果（可选）：progress=有进展；negative=有效阴性；blocked=技术受阻；no_interaction=健康窗口暂无交互；service_unavailable=OOB 服务不可用；observation_incomplete=观察窗口未完成、无法判断；insufficient_impact=有交互但危害不足以成报；prerequisite_disproved=前置条件已证伪；variants_exhausted=关键变体已耗尽；impact=危害已证实。不要把所有失败折叠为 negative。"},
-			"experiment":  map[string]any{"type": "object", "description": "可选的可恢复实验交接：question（待验证问题）、existing_evidence（已有证据）、discovery（static/simulated/executed）、controllable_input、identity（身份/业务状态）、normal_operation（正常操作基线）、variables（声明的变量）、actions（操作序列）、observation（位置/窗口/摘录/state=complete|incomplete|unknown）、execution_state（planned/executed/blocked/unknown）、probe（allocated/send_state=allocated_only|sent|script_unknown|blocked/send_basis）、conclusion、blocker、references（可追溯材料引用）。仅陈述实际可验证状态；模型自填引用不能证明材料存在，未知/未执行不得伪称已执行。"},
+			"experiment":  map[string]any{"type": "object", "description": "可选的可恢复实验交接：question、existing_evidence、discovery（static/simulated/executed）、controllable_input、identity、normal_operation、variables、actions、observation、execution_state（planned/executed/blocked/unknown）、probe、conclusion、blocker、references。execution_state/discovery=executed 必须给 execution_basis；actions[].state=executed 必须给 basis；observation.state=complete 必须给 basis；probe.send_state=sent 必须 allocated=true、本 run oob_generate 返回的 probe_id 和 send_basis（allocation_verified 由宿主填写）。basis 形如 {kind:activity,id:step_id}，从 get_worker_trace 获取本 run 的成功已完成工具结果；普通 node、全局 traffic、旧 run、仅分配 probe、tool_use、错误/阻断/后台未完成均不能证明本轮完成。缺材料或取消时写 unknown/blocked、observation.state=incomplete 与 blocker。references 可引用历史材料，verified 仅代表材料存在；宿主填充 run、provenance、relation，不接受自填归属。来源只证明动作/观察工具已完成，不证明语义结论或漏洞。"},
 			"experiments": map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "可选：一条事实交接多个可区分实验，元素同 experiment；与 experiment 互斥。"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
@@ -2588,7 +2611,8 @@ func (t *ToolSet) getWorkerTrace() actool.CoreTool {
 			"① 只传 intent_id → 返回该 work 每一步的摘要流（summary≤100字，含 step_id；只是动作轮廓，不含完整输出）；\n"+
 			"② intent_id + q → 只返回命中关键字的步骤摘要（在摘要和完整输出里都搜；仍只给 summary，要看内容用③）；\n"+
 			"③ intent_id + step_ids → 返回这些步骤的完整内容(detail)；一次最多取 5 个，超出只返回前 5 个并在 notice/omitted_step_ids 里告知未取的。\n"+
-			"典型流程：先①/②定位可疑步骤的 step_id，再用③取其完整输出。不含思考(thinking)步骤。支持直接关联任务的历史 trace；其结果带 source_task_id/inherited=true 且只读。",
+			"典型流程：先①/②定位可疑步骤的 step_id，再用③取其完整输出。不含思考(thinking)步骤。支持直接关联任务的历史 trace；其结果带 source_task_id/inherited=true 且只读。"+
+			"provenance.run 是宿主运行归属，completed 只证明同步工具成功返回；relation 区分 current_run/prior_run/other_intent/inherited/unknown。旧记录无来源视为 unknown；仅 current_run 的 completed=true 成功 tool_result 可作 record_fact 实验执行/观察 basis，材料存在不代表本轮执行。",
 		obj(map[string]any{
 			"intent_id": idp("意图 id（= work 句柄）"),
 			"q":         str("关键字：只返回摘要/完整输出命中它的步骤（可选；与 step_ids 互斥）"),
@@ -2654,6 +2678,9 @@ func (t *ToolSet) getWorkerTrace() actool.CoreTool {
 					}
 					steps = append(steps, step)
 				}
+				if err := t.traceProvenance(steps); err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
 				result := map[string]any{"intent_id": id, "steps": steps, "returned_step_ids": ids}
 				if len(omitted) > 0 {
 					// returned_step_ids/omitted_step_ids let the model decide programmatically
@@ -2680,7 +2707,11 @@ func (t *ToolSet) getWorkerTrace() actool.CoreTool {
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			result := map[string]any{"intent_id": id, "steps": traceSteps(acts)}
+			steps := traceSteps(acts)
+			if err := t.traceProvenance(steps); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			result := map[string]any{"intent_id": id, "steps": steps}
 			if intentNode.Inherited {
 				inheritedMap(result, intentNode.SourceTaskID)
 			}

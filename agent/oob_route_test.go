@@ -135,9 +135,10 @@ func TestOOBPollPersistsCorrelatedEvidenceAndContinuationBasis(t *testing.T) {
 	if err != nil || len(facts) != 1 || facts[0] != factID {
 		t.Fatalf("事实应关联到产生它的意图: %v %v", facts, err)
 	}
+	observation := routeObservationFact(t, planner, intentID, map[string]any{"summary": "recovered correlated callback", "evidence": "DNS A callback from 192.0.2.10 for the import trigger", "outcome": "progress"})
 	continued, failed := callIntent(t, planner, map[string]any{
 		"summary":    "用回调事实续探 SSRF 危害",
-		"parent_ids": []int64{factID},
+		"parent_ids": []int64{factID, observation},
 		"route": map[string]any{
 			"entry":     "https://EXAMPLE.test/import",
 			"family":    "SSRF",

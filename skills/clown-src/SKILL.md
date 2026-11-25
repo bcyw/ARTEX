@@ -15,7 +15,7 @@ description: 授权范围内的 SRC 漏洞验证、Web/API 安全测试、白盒
 |---|---|
 | 黑盒 Web/API、集团 SRC | [范围与执行](rules/dig-scope-workflow.md)，需要类型选择时读 [价值与矩阵](rules/src-value-hunting.md) |
 | 项目源码、框架安全审计 | [白盒流程](rules/researcher-blackbox-whitebox.md) |
-| 通用 0day、组件利用链、OOB 与路线续探 | [技术路线研究](rules/technical-route-research.md) |
+| 从真实操作推理处理机制、通用 0day、组件链或有界续探 | [技术路线研究](rules/technical-route-research.md) → [机制导航](知识库/README.md#机制导航) → 对应指南 |
 | 已有漏洞证据，需要正式报告 | [报告格式](rules/vuln-report-format.md) |
 | 需要创建任务产物或清理指定任务 | [目录与清理](rules/desktop-task-folder.md) |
 | 用户要求沉淀可复用研究经验 | [知识维护](rules/hunt-iter.md) |
@@ -25,16 +25,14 @@ description: 授权范围内的 SRC 漏洞验证、Web/API 安全测试、白盒
 
 ## 知识按入口选择
 
-**命中触发词即 Read（这是动作，不是判断题）**；不用每站通读整库；无命中不默认任何类型——先回 [范围与执行](rules/dig-scope-workflow.md) 定面，再按全类型矩阵（[打穿短表](知识库/打穿短表.md)）选现场适用的模块，现场有什么打什么。完整模块见 [知识索引](知识库/README.md)；命中判定以 [打穿短表](知识库/打穿短表.md) 为准。
+先从正常操作确认身份、可控输入与实际处理行为，再按 [技术路线研究](rules/technical-route-research.md) 选最能区分假设的下一实验。[知识索引的机制导航](知识库/README.md#机制导航) 给出九族入口、前提和反例；选定路线后读对应指南，具体业务相似案例再查 [打穿短表](知识库/打穿短表.md)。不用每站通读、逐行打卡或凑类型配额；词名和技术栈只提供线索。
 
-| 触发词（接口可观测特征） | 必读模块 |
+例如：模板字段保存原文、导出时才变化，应沿解释执行路线找消费者；只有「模板」菜单不派模板探针。导入可控对象并出现类型解析差分，应沿对象恢复定位阶段；只有 Base64 Cookie 不等于反序列化入口。没有可观察行为时先回 [范围与执行](rules/dig-scope-workflow.md) 定面。
+
+| 补充入口（机制导航之外的上下文） | 按需模块 |
 |---|---|
 | 用户、租户、对象访问，已有高危害或技术链线索 | [IDOR](知识库/idor-test.md)、[认证](知识库/authbypass-test.md)；不主动规划仅证明普通访问差异的验证意图 |
-| 查询、筛选、表达式 | [注入](知识库/injection-test.md) |
-| URL 抓取、代理、预览 | [SSRF](知识库/ssrf-test.md) |
 | 回显、富文本、可写内容 | [XSS](知识库/xss-test.md) |
-| 上传、下载、文件路径 | [上传](知识库/file-upload-test.md)、[路径](知识库/path-traversal-lfi-test.md) |
-| 支付、审核、状态机 | [逻辑](知识库/logic-test.md)、[竞态](知识库/race-condition-test.md) |
 | 前端接口发现 | [JS 分析](知识库/js-reverse-guide.md) |
 | GraphQL / WebSocket / OAuth | [GraphQL](知识库/graphql-test.md)、[WebSocket](知识库/websocket-test.md)、[OAuth/JWT](知识库/oauth-jwt-test.md) |
 | Agent 工具或云 IDE RPC | [工具执行边界](知识库/agent-tool-exec-test.md)、[云 IDE](知识库/cloud-ide-codex-rce-chain.md) |

@@ -149,15 +149,7 @@ func TestRoutePriorityUsesOriginatingIntentEntry(t *testing.T) {
 		t.Fatal(out)
 	}
 	intent := parseCreatedIntentID(t, out)
-	raw, _ := json.Marshal(map[string]any{"intent_id": intent, "summary": "parser observed", "confidence": "observed", "evidence": "POST /parse -> parser exception"})
-	res, err := tools.recordFact().Call(t.Context(), raw, nil)
-	if err != nil || res.IsError {
-		t.Fatalf("%v %s", err, res.Flatten())
-	}
-	var factID int64
-	if _, err := fmt.Sscanf(res.Flatten(), "fact recorded: %d", &factID); err != nil {
-		t.Fatal(res.Flatten(), err)
-	}
+	factID := routeObservationFact(t, tools, intent, map[string]any{"summary": "parser observed", "confidence": "observed", "evidence": "POST /parse -> parser exception"})
 	route["priority_basis"] = "intermediate_evidence"
 	out, failed = callIntent(t, tools, map[string]any{"summary": "verify parser", "parent_ids": []int64{factID}, "route": route})
 	if failed {
@@ -177,14 +169,10 @@ func TestRouteNegativeCannotBePromotedForCoverage(t *testing.T) {
 		t.Fatal(out)
 	}
 	id := parseCreatedIntentID(t, out)
-	raw, _ := json.Marshal(map[string]any{"intent_id": id, "summary": "reliably disproved", "confidence": "observed", "evidence": "controlled negative response", "outcome": "negative"})
-	res, err := tools.recordFact().Call(t.Context(), raw, nil)
-	if err != nil || res.IsError {
-		t.Fatalf("%v %s", err, res.Flatten())
-	}
+	routeObservationFact(t, tools, id, map[string]any{"summary": "reliably disproved", "confidence": "observed", "evidence": "controlled negative response", "outcome": "negative"})
 	route["tested"] = []string{"coverage retry"}
 	out, failed = callIntent(t, tools, map[string]any{"summary": "coverage gap", "route": route, "priority": 10, "priority_reason": "uncovered type"})
-	if !failed {
+	if !failed || !strings.Contains(out, "已确定停止") {
 		t.Fatal("negative route revived:", out)
 	}
 }
@@ -205,7 +193,8 @@ func TestRouteUnsubstantiatedNegativeDoesNotStop(t *testing.T) {
 				t.Fatalf("%v %s", err, res.Flatten())
 			}
 			route["tested"] = []string{"distinct bounded variant"}
-			out, failed = callIntent(t, tools, map[string]any{"summary": "next variant", "route": route})
+			fresh := routeObservationFact(t, tools, 0, map[string]any{"summary": "new discriminator", "evidence": "POST /parse -> distinct parser handler"})
+			out, failed = callIntent(t, tools, map[string]any{"summary": "next variant", "route": route, "parent_ids": []int64{fresh}})
 			if failed {
 				t.Fatal("unsubstantiated negative stopped route:", out)
 			}

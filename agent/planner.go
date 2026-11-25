@@ -7,13 +7,13 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bcyw/artex/db"
-	"github.com/bcyw/artex/intercept"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/norma/transcript"
+	"github.com/bcyw/artex/db"
+	"github.com/bcyw/artex/intercept"
 )
 
 // Planner is the event-driven LLM planner (docs §4.3): each time the asset or
@@ -307,18 +307,18 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 **本轮该产出几个意图（先想清楚这条）**：
 - 只对有真实入口、可执行假设且未触发停止条件的方向派意图。无 open/running 不等于必须重派；全部路线停止或缺少前置时可产出 0 个意图，如实记录阻塞与剩余目标，不伪称完成。
 - **产出 0 个意图是正常结果，但要有正当理由**：方向已被 open/running 覆盖、等待前置事实，或路线已停止/预算耗尽。有效阴性、类型触顶、路线或全局预算耗尽不能因类型未覆盖而重新提权、改名重派。
-- 反过来：确有【未覆盖、且不依赖在跑 work】的新方向，或目标未达成且范围内仍有未测面，就该派——别把 0 意图当偷懒的默认。
+- 确有未覆盖、前置可达、能区分剩余解释的新方向且仍有预算时就派；“尚未测过”本身不是派发理由。
 
 **每次唤醒的决策流程**：
 
 1. **完整态势已附在本提示下方**（就是 graph_overview 的返回，无需再调它）：task（原始标题+目标/根节点）、资产计数、goals+状态、open/running/recent_done 意图、sites_without_endpoints（无端点的站点，提示可能待探的方向）、facts（探索事实数，与漏洞是两类）、recent_facts（{id,summary,confidence?}）。
    - **范围**：探索节点（goals/意图/facts/findings）只含本任务；**资产图全局共享**（多任务同一份，资产计数是全局在范围内的、非本任务独有）——出现非本任务相关的资产时忽略。
    - **血缘**：每个意图带 parents（上游：派生自哪些事实/意图）和 yields（下游：产生了哪些事实/发现），recent_facts 每条带 from_intent；据此理解"哪些事实来自哪个方向、能否综合出新方向"。
-   - **否定/存疑观察**：先 node_detail(id) 检查 evidence 与 confidence。observed 的路线级 negative 是有效阴性，停止该路线；单个变体未命中或 inferred 猜测不等于路线级阴性。只有新证据/已测变体提供信息增量且仍有预算时才考虑续探，不自动派复核。摘要只是索引，关键决策回读原始证据；一个失败请求不证明全部资产安全。
+   - **否定/存疑观察**：先 node_detail(id) 回读实际实验、evidence 与 confidence。结论性停止须有 observed 观察及可定位的支持证据，并说明排除了什么；单个变体未命中、空 OOB 窗口或 inferred 猜测不等于路线级阴性。只有新证据解决了具体不确定性且仍有预算时才考虑续探，不自动派复核。摘要只是索引，一个失败请求不证明全部资产安全。
    - **要更深细节才按需调**：list_facts（分页，最新在前，默认 20，可 q 过滤、before 翻页，带 total/has_more）、list_findings（全部漏洞）、node_detail(id)（完整证据/详情；列表/recent_facts 只给摘要）、list_assets（pull：q 搜索、type/company_id/task_id 过滤、分页，或 id/ids 直取）、asset_neighbors。资产全局共享，别默认拉全量。
 
 2. **判目标（核心职责）**：goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id, evidence_id, reason) 标 met。**当你标记的恰是最后一个未完成目标时，系统自动判定整个任务完成**——收官只由逐个 prove_goal 驱动，没有别的"一键完成"手段。
-   - ⚠️ **量化验收核对（严禁提前盖章）**：目标含可量化条件（覆盖度达 X%、拿 N 个 flag、获得某权限）时，prove_goal 前【必须】核对上方 graph_overview 的实测值（coverage.pct、findings_total 计数等）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。
+   - **量化验收核对**：目标含可量化条件（覆盖度达 X%、拿 N 个 flag、获得某权限）时，prove_goal 前核对 graph_overview 的实测值与证据；未达标禁止标 met。有可执行且未停止的方向才补差，否则记录目标未完成及原因，不为数字绕过预算与停止条件。
    - ⚠️ **持续挖掘目标（SRC 场景）**：只有范围内有真实入口的主要技术路线已取得结论，且无可执行的剩余高价值假设时，才能依目标原文判断是否 prove_goal。没有入口的目录类型不是必测配额；预算耗尽或受阻不等于目标达成，写清已验证、已证伪、未测与阻塞项。
 
 3. **（可选，仅开局、极轻量）探测理解**：仅当图里几乎还没有 fact（recent_facts 基本为空、任务刚开始）、仅凭态势无法把初始意图说具体时，才用 Bash 等对目标做极少量、只读的探测（如 1–2 次 curl 看首页/指纹）。**唯一合法产物是一句更精准的意图描述**——绝不是漏洞的发现/验证/利用，也不是端点/目录/参数的枚举结果（那些是 worker 的活，写成意图派下去）。三条硬边界：
@@ -330,9 +330,9 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
    - **SRC 方向价值排序**：有真实入口且 parent_ids 提供具体中间证据、可控危险输入或明确组件利用链时，在 route.priority_basis 分别填 intermediate_evidence / controllable_input / component_chain，默认优先级 8；仅技术栈猜测填 stack_guess，默认 3。无路线默认 5；显式 priority 范围 0–10，偏离路线默认值须写 priority_reason。type_coverage 用于检查可收性和触顶，不是补齐类型的配额。不主动规划仅证明普通访问差异的验证意图；普通越权/未授权可作为技术链入口，批量敏感数据、核心账户接管等真实高危害仍按标准验证上报。
    - 已有 open/running 覆盖 → 不再生成（正在处理）。
    - 在 recent_done 里出现过 → **先看该意图的 state（每条都带）分辨怎么停的，再决定**：
-     · **done（正常跑完）**：已覆盖 → 不原样重派；是否死路看它 yields 出的 fact 结论、而非 state；仅出现【材料性新机理】（新事实/资产/参数/明显不同的打法）才重派，且 summary 写清与上次的不同；换措辞、"再试一次说不定行"不算，禁止重试。
+     · **done（正常跑完）**：已覆盖 → 不原样重派；是否死路看它 yields 出的事实证据而非 state。仅当新的实际观察改变前置条件、可达阶段或剩余解释，才按路线准入继续；换名称、摘要、参数值或“再试一次”不算进展。
      · **exhausted / blocked**：先用 get_worker_trace / get_worker_output 查进度与失败原因。仅在路线仍有预算、未停止且具备信息增量时续探；外部故障本身不算增量，不自动重派整个 worker。
-   - 完全无任何意图覆盖的全新方向 → 生成（新方向同样必须落到目录内某个 collect: yes 的可收类型；目录外自造类型会在建意图时被拒）。
+   - 完全无任何意图覆盖且具备前置的全新验证方向 → 生成（验证须落到目录内某个 collect: yes 的可收类型；纯侦察仍省略类型，写清要补的前提与交付物）。
    - 已有方向都在 open/running 中，或剩余路线已停止/缺前置 → 不生成，记录原因并结束本轮。
    - **深度优先于覆盖度**：coverage 是下限/验收项、不是探索目标本身；发现高价值入口（可能通向 RCE/提权/数据外泄）后，优先派意图把那条路【往深打穿】，而不是为拉平覆盖度去铺广、逐个资产浅测。
    - **从业务入口到技术机制**：先找用户输入经解析、存储、转发或执行跨越信任边界的具体位置，再选择路线；已知组件先核实入口、配置和前置条件。缺少哪项就只补哪项，不因为首页指纹相同就重复全量测绘，也不因为未找到 CVE 就放弃通用机制研究。
@@ -341,9 +341,9 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
    **串行利用链：分步派，别拆成并行。** 强依赖串行链（①→②→③，后一步依赖前一步的实际产出）：不要一次性并行下发（下游拿不到还不存在的前置只会重复/空转）；用 TodoWrite 把整条链记成待办（每步一条），本轮只派"前置已满足"的那步（通常第一步），待它产出 fact 后下次唤醒（提示会带上待办清单）再派下一步并把已满足的标 completed。"同一件事"别拆两条（"确认触发点"和"触发触发点"是同一步）；只有【平行、互不依赖】的维度（如枚举多个不相关端点）才用多意图并行。
 
-5. **技术利用路线**：复杂漏洞按「入口 + 机制族 + 组件/参数」组织成稳定路线。route 用于同一路线的预算、去重与续探；family 写技术机制（反序列化/SSRF/SSTI/组件CVE/文件读写…），entry 写真实入口，已知组件/参数时写 component/parameter，并用 prerequisites、hypothesis、next_step、tested、remaining 留下可执行状态。同一入口换 summary、payload 或机制拼写不算新路线；同路线后续意图必须在 parent_ids 带上此前未用于该路线的新 fact/finding，或带新的 tested 变体——自由文本不是信息增量。
-   - **有界续探**：同入口同机制族默认最多执行 6 次意图（续跑也计数，运行配置可调）；6 次是上限不是目标。出现 impact、negative、prerequisite_disproved、variants_exhausted，或任务暂停/终态/截止、既有类型上限触顶时立即停止该路线，不得换措辞重试。
-   - **信息增量**：连续 3 个规划轮次同路线没有新增 fact/finding、交互、关键响应、机制/组件/版本或 tested 变体时换方向；新信息重置计数。OOB no_interaction 与服务不可用不是“目标无漏洞”，不计作路线进展，也不要因此自动重派整个 worker。
+5. **技术利用路线**：复杂漏洞按「入口 + 机制族 + 组件/参数」组织成稳定路线。route 用于预算、去重与续探；family 写技术机制，entry 写真实入口，已知时填写 method、input_location、component/parameter；prerequisites、hypothesis、next_step、tested、remaining 保留可执行状态。同一入口换 summary、payload 或机制拼写不算新路线；同路线后续意图必须用 parent_ids 引用此前未用于该路线、且含实际信息增量的 fact/finding。tested 只是已执行历史，计划放 remaining；新字符串或新节点 ID 不自动构成信息增量。
+   - **有界续探**：同入口同机制族默认最多执行 6 次意图（续跑也计数，运行配置可调）；6 次是上限不是目标。有 observed 观察及可定位执行证据支持的 impact、negative、prerequisite_disproved、variants_exhausted 才能结论性停止；未经支撑的标签不算。任务暂停/终态/截止、类型或路线预算触顶独立生效，不得换措辞重试。
+   - **信息增量**：连续 3 个规划轮次同路线没有可核验的新观察时换方向。实际动作与观察应说明缩小了哪个解释、满足了哪项前置或到达了哪个新阶段；重复证据、nonce、ID、摘要与计划变体不重置计数。OOB no_interaction 与服务不可用不是“目标无漏洞”，不计作路线进展，也不自动重派整个 worker。
    - **状态区分**：事实 outcome 必须区分 progress（路线进展）、negative（有效阴性）、blocked（技术受阻）、no_interaction（健康窗口暂无交互）、service_unavailable（OOB 服务不可用）、insufficient_impact（有交互但危害不足）与 prerequisite_disproved/variants_exhausted/impact。不要把外部故障或空窗口折叠成 negative。
 
    - **按需上下文**：routes 仅提供有界摘要（入口、已测变体、失败原因、剩余假设和 latest_node_id），不含全部历史 payload 或原始 OOB 事件。需要完整证据时用 node_detail、list_facts 分页、worker trace 和可用的 OOB 查询定位。
@@ -355,8 +355,8 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
    - **summary**：一句话自然语言描述该方向（测试目标完整地址 + 做什么 + 为什么）；类型由 vuln_type 结构化声明，不要只在 summary 里写类型来替代它——去重同时比对 summary 与 vuln_type。
    - **asset_ids**：本方向要测试/攻击的目标资产 id（尽量传，0/1/多个，来自 list_assets）——只要方向围绕具体资产（站点/接口/参数/主机）就务必传，用于覆盖去重、连入资产链路，跨多资产就都传；纯全局侦察无具体资产才留空。
    - **parent_ids**：只能传已存在的 fact/finding 节点 id；由某意图派生时传它产出的事实/发现 id，不传意图、目标、提示或资产 id。多个事实共同支持路线时都传；顶层全新侦察留空。
-   - **route/route_cap**：路线化方向传 route；续跑同路线必须让 parent_ids 提供此前未用于该路线的新 fact/finding，或用新的 tested 变体提供真实增量。route_cap 仅在该路线有明确运营理由时覆盖默认 6 次上限。
-   - **原意图续跑**：原意图已结束但已有新的 fact/finding 或未测变体时，用 continue_intent(intent_id, message, parent_ids, route) 在同一 worker 会话上再跑一轮；它按同一路线计次，不新建议图节点，也不绕过停止条件。新方向或需要独立血缘时才用 add_intent。
+   - **route/route_cap**：路线化方向传 route；续跑同路线必须由 parent_ids 提供此前未消费的实际证据增量。route_cap 仅在该路线有明确运营理由时设置，不用于刷新已用预算。
+   - **原意图续跑**：原意图已结束且已有支持下一实验的新 fact/finding 时，用 continue_intent(intent_id, message, parent_ids, route) 在同一 worker 会话上再跑一轮；它按同一路线计次，不新建议图节点，也不绕过停止条件。只剩未执行的计划时不重派。新方向或需要独立血缘时才用 add_intent。
    - **核对落地**：检查 ids/errors，只修正失败项；已成功创建的不再重发。遇到类型、血缘或路线预算拒绝，按真实原因调整，不靠换摘要或放大 route_cap 绕过。批次结束用简短结论说明本轮证据变化、选择这些路线的理由、等待条件或停止原因。
 
 不重复、不硬凑；但目标未达成、又有未覆盖且更深的打法时，该派就派。简洁、聚焦、高效。`
@@ -479,13 +479,12 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	lead := "刚有具体变动（见下面的【本次触发本轮的实际变动】），据此规划下一步："
 	if len(triggers) == 0 {
 		lead = "本轮是**定时巡检（心跳到点）/无具体变动信号**的唤醒——图不一定有新变动。顺带复查在跑意图：长时间无进展或跑偏的用 steer_work 纠偏、方向整个错的用 kill_work 止损；再判定目标、决定是否补方向："
-		// 心跳/无变动唤醒时,若全图已无任何 open 或 running 意图 → 探索已停摆(没 worker 在跑、
-		// 也没排队方向)。明确告知 planner 并强制其本轮补出新方向,别只复查在跑意图后空转一轮。
+		// An empty frontier is context, not an instruction to bypass route stops.
 		if active, err := ts.HasActiveIntent(); err == nil && !active {
-			lead = "本轮是**定时巡检（心跳到点）**的唤醒,且当前**已没有任何 open 或 running 的意图**——没有 worker 在跑、也没有排队中的方向,探索已停摆。你**必须**在本轮产出一个或多个向目标推进、且与图中既有意图**互不重复**的新意图(不得产出 0 意图);先据下面的态势判定目标是否已达成,未达成则立即补方向："
+			lead = "本轮是**定时巡检（心跳到点）**，当前没有 open 或 running 意图。先核对目标与已有证据；仅在有前置可达、未停止且预算内的新方向时派发，否则允许 0 意图并记录具体阻塞或停止原因："
 		}
 	}
-	input := lead + situational + "\n\n据上面的态势，判定目标。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记。**硬底线：只要目标尚未达成、且当前没有任何 open 或 running 意图（frontier_open=0 且 running_intents 为空），本轮就必须产出至少一个向目标推进的意图——此时没有在跑的 work 可等、也没有在排队的方向，产出 0 意图=任务停摆。仅当已有 open/running 意图在推进、或目标已达成时，本轮才可以不产出新意图。**" +
+	input := lead + situational + "\n\n据态势判定目标：只有已有证据真正满足目标时才用 prove_goal。无在跑意图不代表必须补派；依据实际证据、前置条件、路线停止与预算决定派发或等待。受阻、有效停止或预算耗尽时可产出 0 意图，说明未完成目标与所缺条件，不伪称达成。" +
 		renderPlannerTodos(opts.Todos.List())
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。

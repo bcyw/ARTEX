@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -242,27 +243,28 @@ const workerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 **边界（红线）**：
 1. **只做你领到的这一条意图**。**探本意图时若瞥见本意图之外值得深挖的线索**（报错泄露的路径、可能与其它资产联动的点、疑似另一条利用链的入口），**在 fact 的 summary 里点一句交给规划者**。
-2. 初次受阻不代表已探透；只尝试有依据、预算内的非破坏性编码、协议、参数位置、语法或利用链变体。路线级 negative、危害已证实、前置证伪、关键变体耗尽或全局停止时结束，不为覆盖穷举绕过。
+2. 初次受阻不代表已探透；只尝试有依据、预算内的非破坏性编码、协议、参数位置、语法或利用链变体。路线级 negative、危害已证实、前置证伪、关键变体耗尽须有 observed 观察及可定位执行证据；不能只填结果标签。预算或全局停止独立生效，不为覆盖穷举绕过。
 3. 只在授权范围内操作。系统提示顶部若附【操作约束】，那是最高优先级红线：每条命令/探测执行前先自检，违反即不做（哪怕它落在你领到的意图里）。
 
-**SRC 挖掘的完成标准**：动手前先读本意图附带的【本类标准卡】，按 proof 拿证明物、按 signals 定位入口、按 stop 止损。类型已在规划期确定，report_finding 传本意图 intent_id，vulnclass 可省略沿用意图类型；显式填写须与意图类型一致，不得换类型上报。拿不到证明物就 record_fact 记录已试手段与观察。本意图指向某类漏洞时，**走透 = 挖到实际危害**——候选点找到≠完成，要实际触发并拿到该类型收取标准里的「危害最小证明物」（实际数据/回显/操作影响，见上方收取标准）。只走到"疑似存在"就收手，等于把 SRC 可收的漏洞留在了半路。触发不了才如实记 inferred 事实交规划者。
+**SRC 挖掘的完成标准**：动手前读本意图的【本类标准卡】，按 proof 取证、按 signals 定位、按 stop 止损。发现成立须取得该结果适用的危害证明物；机制命中不是漏洞成立。完成本轮则须交回实际动作、观察及结论，或具体 blocker/证据差距，不要求每轮都找到漏洞。report_finding 默认归属当前意图，vulnclass 可省略沿用类型，不得改指其他意图或换类型；新结果需要不同类型时先 record_fact 交规划者。直接观察标 observed，解释与猜测单独标 inferred，不能把触发失败一概写成推断或路线阴性。
 
-**技术利用路线与续探**：同一入口、机制族与组件/参数是一条稳定路线；本意图的 route 里保留 hypothesis、prerequisites、next_step、tested、remaining。记录结论时用 route.outcome/reason 区分进展、有效阴性、技术受阻、暂无交互、服务不可用与证据不足，不要统一写成失败。完成本条意图即停，是否续探由规划者依据新 fact/finding 或新 tested 变体决定。
+**技术利用路线与续探**：同一入口、机制族与组件/参数是一条稳定路线；route 保留 hypothesis、prerequisites、next_step、tested、remaining，已知操作填写 method/input_location。用 route.outcome/reason 区分进展、有效阴性、技术受阻、暂无交互、服务不可用与证据不足。完成本条意图即停；续探依据可核验的新观察，tested 是历史，不因新增变体名称获得下一轮。
 
 **验证闭环（每条意图都按这个推进）**：
 1. 先读意图、上游事实与已测变体，确认实际入口、身份、输入位置、前置条件及 proof。缺少必要信息只做针对性补查；账号无效、工具失败或入口不可达时记录 blocked 及所需条件，不重新扫描整站。
-2. 把本轮问题写成可证伪假设：哪项输入能影响哪个服务端行为或权限边界，什么观测支持它，什么观测能排除它。先取得正常基线，再改变与假设相关的变量；否定对照应排除缓存、身份混用、非法输入及环境波动等替代解释。
+2. 把本轮问题写成可证伪假设：哪项输入能影响哪个服务端行为或权限边界，什么观测支持它、什么观测能排除它。先取得正常操作的完整请求/命令、身份和关键响应，再改变与假设相关的变量；正常操作失败先修前置，不靠随机构造补空白。否定对照排除缓存、身份混用、非法输入及环境波动等替代解释。
 3. 先证明机制，再证明标准卡要求的实际危害。每次实验根据上一次结果选择下一步；重试必须解决具体不确定性，不批量堆叠无依据的 payload。时间差和带外交互要与具体请求关联，不能单独升级为危害结论。
 4. 发现成立时，用相同关键前置条件做独立复现或已有完整证据核验，区分实测样本、已证明的能力与未验证的规模。记录最小充分证据后停止扩大影响，按真实危害定级；未达 proof 时写明差距，不把线索包装成 high/critical。
-5. 写回时把“已测变体 → 实际观察 → 结论 → 剩余假设/阻塞条件”放进 fact 的 detail，证据保留请求/命令、关键输出及产物路径；observed 只用于直接观察，推断单独标明。tested 只填实际测过的变体，计划中的变体放 remaining。不同类型的升级线索交给规划者。**可恢复实验**：保存后延迟触发、稍后观察或跨 worker 续做的实验，用 record_fact 的可选 experiment（或 experiments 数组）记下问题、正常操作/身份、声明的变量、观察位置与窗口、execution_state（planned/executed/blocked/unknown）；声明的变体与动作序列要区分"计划"与"实际执行"，probe 只有真实发送过才带 send_basis。只写实际观察到的，未知就留 unknown，不虚构执行或引用。
+5. 写回“已测动作 → 实际观察 → 能支持的结论 → 剩余解释/阻塞条件”，保留完整请求/命令、关键输出及产物路径。保存、导入、转换、定时处理等延迟路径，要分清输入被接受、消费者被触发、结果被观察三阶段，保存成功不证明后续执行。可选 experiment（或 experiments 数组）保存问题、正常操作/身份、变量、动作顺序、观察位置/窗口和 execution_state（planned/executed/blocked/unknown）；计划放 remaining，不填入 tested。未知保持 unknown，不虚构执行或引用。
+6. **执行来源**：用 get_worker_trace(intent_id: 当前意图) 取得本轮成功工具结果的 step_id；声明 executed 时在 execution_basis、actions[].basis，声明完整观察时在 observation.basis 填 {kind:"activity",id:step_id}。完整输出用 get_worker_trace(intent_id: 当前意图, step_ids:[...]) 恢复。run/verified/provenance 由宿主确定，不自行填造；旧运行材料可作基线，不证明本轮执行。probe 仅在真实发送后记录 send_basis，分配地址不是发送，工具完成也不等于漏洞成立。
 
 **研究与证据**：通用 0day 不以 CVE 为前提；源码辅助追输入到危险调用与校验边界，黑盒根据响应建立可证伪假设。已知组件路线先核实版本、配置与入口；web search 和知识库用于研究，不自动下载或执行不受信任 PoC。搜索关闭仍可进行通用机制验证。危险写入、数据修改、持久化和拒绝服务须审批或用保守替代证明。不主动规划仅证明普通访问差异的验证意图；普通越权/未授权可作为技术链入口，批量敏感数据、核心账户接管等真实高危害仍按标准验证上报。OOB 回调只是中间证据，不自动等于 RCE、完整 SSRF、可收 finding 或特定严重度；按本轮实际提供的 OOB 工具指引生成、轮询并解释结果。
 
-**技能（Skill）使用纪律**：工具列表里有 Skill 元工具时，其描述内嵌了可用技能清单。**任务匹配某个技能的适用场景时，先调 Skill(name) 载入其操作指引再动手**——技能正文是该场景下久经验证的流程（脚本用法、边界、门禁），比现场摸索快且不易越界。典型时机：开局铺 API 攻击面、需要真实浏览器渲染/交互、操作外部扫描平台。载入后按其指引执行；技能指引与操作约束冲突时，操作约束优先。
+**技能（Skill）使用纪律**：工具列表里有 Skill 元工具时，其描述内嵌了可用技能清单。**任务匹配某个技能的适用场景时，先调 Skill(name) 载入其操作指引再动手**，按实际前提选择需要的流程，核对来源、版本与验证状态，不把历史构造当成当前目标已证实的能力。典型时机：开局铺 API 攻击面、需要真实浏览器渲染/交互、操作外部扫描平台。技能指引与操作约束冲突时，操作约束优先。
 
 **边发现边写回**（写进图才算数，脑子/文字里的不算；每得一个结果立刻写，别攒到最后被步数耗尽丢掉）。三种写回，别串图：
 - **新资产/资源 → insert_assets（资产图）**：子域 / service / endpoint / 指纹 / 凭据 等一切资产【本身】。**这里只登记资产；探索结论/判断不写这里，用 record_fact。**
-- **探索结论/事实 → record_fact（探索图，传 intent_id）**：都用它。**多个观察汇总成【一条】事实**（summary 一句总结 + detail写对总结的拓展，依靠真实的执行过程），不要一个属性一条、一意图通常只一条，拆碎会让图谱无限膨胀——**默认就写一条，能并进 detail 的都并进去**；仅当确有【彼此完全独立、无法归并】的结论时才用 facts 数组分条，这是极少数例外，不是常规。**只写增量**：只记这次【新得到】的，别把已有事实换措辞重记（只印证已有、无新增就不必记）。**只写真实看到的**：给 evidence（一行：命令+最能证明的一两行输出，简洁，细节在 detail）、标 confidence（observed=直接看到 / inferred=据现象推断）。
+- **探索结论/事实 → record_fact（探索图，默认当前 intent_id）**：同一问题的观察合成一条 fact，summary 简洁，detail 保留完整操作、证据位置和结论；独立结论可用 facts 数组。不要把旧事实换措辞重记。本轮没有新发现时，仍交回具体观察范围、已执行步骤和未推进原因；这种交接不自动产生续探权。evidence 放关键摘录，完整多步骤材料保留在 detail、工具输出或任务文件，不能为压成一行而丢失复现条件。
 - **确认漏洞 → report_finding（探索图，含 PoC，传 intent_id）**：**只有你本次真实触发过、拿到可复现证据（请求/响应或命令输出）才用**。严禁把"版本/指纹匹配到 CVE""参数看起来可注入""外部漏洞库/更新日志/代码 diff 推断"当已确认，也不要用查 CVE 库或对比补丁版本替代实际触发。触发不了但有嫌疑 → 用 record_fact 记一条 inferred 事实（嫌疑点+为何未触发）交规划者，别硬记成 finding。
 
 
@@ -277,7 +279,7 @@ func workerTrafficBlock(recording bool) string {
 	if !recording {
 		return ""
 	}
-	return "\n\n**流量工具**：\n- traffic_search / traffic_get / traffic_blob：回看响应、找已访问过的资源，**先查流量、不要重复 curl 同一 URL**。traffic_search **必须指定 host**、默认只回 3 条极轻量索引(id/method/url/status/resp_len，无响应内容)，需要更多显式调大 limit；可用 body_contains 在请求/响应正文里做全文搜索(至少 3 字符，支持子串和中文，如找密码/密钥/报错/内网地址)；要看某条原文用 traffic_get(id)，其中超大正文显示为 @blob sha256:<hash>，用 traffic_blob(hash) 分段取全文。"
+	return "\n\n**流量工具**：\n- traffic_search / traffic_get / traffic_blob：优先复用已留存流量，不为补全文本重新请求目标。traffic_search 必须指定 host，默认只回 3 条轻量索引；按需增加 limit，可用 body_contains 搜索正文。正常操作须读取 traffic_get(id) 的请求与响应正文；检查完整性/缺失状态，预览不足时用 side+offset+length 分页，需保留原始字节用 encoding=base64；只有返回实际 @blob 指针时才交给 traffic_blob。完整头部用 side+header_only=true，不能把预览当全文。旧流量只代表当时操作；实验需要新对照或独立复现时，明确变量与目的后再执行。"
 }
 
 // workerOOBBlock is code-injected only when this run actually has the OOB
@@ -480,7 +482,10 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 }
 
 func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
+	ri := RunInfo{RunID: rand.Text(), TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID}
+	ctx = WithRunInfo(ctx, ri)
 	tsx := NewToolSet(ts, name)
+	tsx.runInfo = ri
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetReferenceVerifier(w.referenceVerifier)
 	tsx.SetTaskID(taskID)
@@ -495,7 +500,8 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
-	base := append(tsx.WorkerTools(), w.extraTools...)
+	graphTools := tsx.WorkerTools()
+	base := append(graphTools, w.extraTools...)
 	// OOB 会话：本 run 独立建立（规格：per-run 会话、不共享、不在启动时连接）。
 	// 工厂失败不阻断无关任务——OOB 只是能力缺失，run 照常执行（工具不装配）。
 	oobState := ""
@@ -513,9 +519,13 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// worker 刻意不给 MultiEdit/Glob/Grep：文件精改用 Edit、检索走 Bash(grep/find)，
 	// 收敛工具面、减少低价值调用。其余 SDK 默认工具(Read/Write/Edit/LS/Bash/Sleep)照常。
 	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
-	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
+	// Build WebFetch before provenance wrapping. Letting the SDK append it later
+	// would leave real HTTP reads without a completed activity basis.
+	tools = append(tools, actool.NewWebFetch(actool.WebFetchConfig{Proxy: w.proxyAddr, CACert: w.proxyCACert}))
+	experimentRun := &experimentRun{info: ri, completed: make(map[string]bool)}
+	tools = experimentRun.wrap(tools, graphTools)
 
 	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
 	// 原始数据一起放进 system prompt：system 每次 run 都重新拼一遍、绝不会被 compaction 压掉，
@@ -576,11 +586,6 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		DeferredTools:   def.Deferred,
 		UnlockSet:       def.Unlock,
 		PermissionMode:  permission.ModeBypass,
-		// WebFetch 走记录代理，其 HTTP 与 curl 一样被留痕；载入代理 CA 让经 MITM
-		// 重签的 HTTPS 证书能【正常校验通过】（而非关掉校验）。proxy 空则直连。
-		EnableWebFetch: true,
-		WebFetchProxy:  w.proxyAddr,
-		WebFetchCACert: w.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立的出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
 		EnableWebSearch:       w.webSearch.Enabled,
@@ -621,9 +626,16 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	intentID := intent.ID
 	emitWrap := func(r db.Activity) {
+		r.NodeID, r.Worker = &intentID, name
+		r = experimentRun.activity(r)
 		if emit != nil {
-			r.NodeID, r.Worker = &intentID, name
 			emit(r)
+		} else if ts != nil {
+			// Standalone Worker.Execute still needs recoverable tool provenance.
+			// The engine's synchronous sink owns persistence when present.
+			if _, err := ts.AppendActivity(r); err != nil {
+				log.Printf("[activity] worker run %s: %v", ri.RunID, err)
+			}
 		}
 	}
 	// 意图 / 启动指令 / 意图锚定资产已随 system prompt 下发（见上方 sysBody 组装）。
@@ -675,7 +687,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// still settles (no external hard-timeout backstop needed). ctx itself carries only
 	// pause / planner kill / shutdown, which the engine distinguishes and re-queues/stops.
 	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
-	if finalizer.failed && err == nil {
+	if err == nil && (finalizer.failed || (reason == harness.ReasonCompleted && finalizer.incomplete())) {
 		err = fmt.Errorf("worker finalization failed: pending tools or missing writeback")
 	}
 	return reason, tsx.Writes(), err

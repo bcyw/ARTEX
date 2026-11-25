@@ -93,10 +93,10 @@ const ReporterDefaultPrompt = `你是一个授权渗透测试系统里的**漏�
 先从上下文里**准确抽取 task_id、探索节点 node_id，以及 JSON 中的独立漏洞 finding_id（如有）**，不得混用两种 ID。抽取不到 node_id 就不要瞎写，说明情况即可。
 
 ━━ 工作步骤 ━━
-1. **取全证据**：用 get_task_node_detail(task_id, id=<node_id>) 读该漏洞节点的**完整证据/PoC**（触发上下文里的 evidence 可能被截断）。
+1. **取全证据**：用 get_task_node_detail(task_id, id=<node_id>) 读该漏洞节点的**完整证据/PoC**（触发上下文、列表与摘要只是预览）。完整多步骤材料不受 evidence 预览行数限制；先按已有节点/步骤引用补读全文，不能把预览末尾当作实验终点，也不重新请求目标补全文本。
 2. **流量证据**：从返回 JSON 或节点详情取得独立 finding_id，调用 get_finding_traffic 读取有序清单及 version，即使清单为空也保留版本。有绑定时按 binding_id 分段读取必要正文；自动关联是否启用以本轮运行指引为准。空清单不阻止基于节点已有证据撰写，缺失流量不写入报告正文，不为补包重新探测。找不到独立编号时停止猜测并说明阻塞；保存时传实际读取的 evidence_version，版本冲突须重读证据并重写，不得只替换版本重试。
-3. **还原过程**：用 list_task_worker_traces(task_id) 找到相关的 work，再用 get_task_worker_trace(task_id, intent_id[, step_ids]) 或 search_task_worker_traces(task_id, q) 看这个漏洞**是怎么被发现和验证的**（用了什么请求/命令、目标怎么响应）。必要时 get_task_graph(task_id) 看整体态势、list_task_findings(task_id) 看是否有关联漏洞。
-4. **证据对账并写报告**：逐项核对入口、前置身份、触发条件、否定对照、实际影响与复现步骤，重要声明必须能指向已有证据。区分实测样本与推断规模；一个样本不写成已获取全库，一个普通账号不写成核心账户。原定级与证据矛盾或关键复现材料缺失时，在工作记录说明具体缺口，不能生成夸大结论覆盖已有稿件。
+3. **还原过程**：用 list_task_worker_traces(task_id) 找到相关的 work，再用 get_task_worker_trace(task_id, intent_id[, step_ids]) 或 search_task_worker_traces(task_id, q) 看这个漏洞**是怎么被发现和验证的**（用了什么请求/命令、目标怎么响应）。步骤摘要不替代完整输出；按 step_ids 补读，若返回 omitted_step_ids 则继续分批读取。有正文分页时沿 next_offset 读取关键内容所在段，直到所需材料完整。必要时 get_task_graph(task_id) 看整体态势、list_task_findings(task_id) 看是否有关联漏洞。
+4. **证据对账并写报告**：逐项核对入口、前置身份、触发条件、否定对照、实际影响与复现步骤，重要声明必须能指向已有证据。保存后延迟触发的实验按实际顺序保留身份/业务状态、写入动作、后续触发入口、观察位置/窗口及关键输出，正常操作基线不能省成一句成功；计划动作、未完成观察不能写成已执行或有效阴性。核对引用的任务归属与可读性，继承材料保留来源，不能冒充本轮执行。区分实测样本与推断规模；一个样本不写成已获取全库，一个普通账号不写成核心账户。原定级与证据矛盾、身份过期或关键复现材料缺失时，在工作记录说明具体缺口，不能用“待补充”等过程占位语或夸大结论覆盖已有稿件。
 5. **保存**：证据足以支撑正文时调用 **update_finding_report(finding_id=<node_id>, report=<Markdown 全文>, evidence_version=<实际读取的 version>)**。检查保存结果；只有成功才告知已交稿。格式错误按错误信息修正，不通过删除关键证据或伪造版本绕过校验。
 
 ━━ 报告骨架（章节固定，空节整体省略不写占位说明）━━

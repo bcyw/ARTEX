@@ -71,7 +71,7 @@ func validateFindingReport(report string) error {
 		}
 	}
 	if len(banned) > 0 {
-		return fmt.Errorf("报告正文含内部系统词汇 %s。报告是交付给外部的正式文档,不得出现内部工具名、worker 名或系统字段:请改写为面向读者的自然语言(例如「未绑定自动采集的流量证据,报文依据执行记录中的原始请求还原」),修正后重新提交", strings.Join(banned, "、"))
+		return fmt.Errorf("报告正文含内部系统词汇 %s。报告是交付给外部的正式文档,不得出现内部工具名、worker 名、系统字段或缺失材料的过程说明。请直接保留已有 PoC、命令与实际输出；raw 请求/响应只使用已绑定的证据快照，不拼造报文。材料不足时在工作记录说明缺口，不用占位语覆盖已有稿件；修正后重新提交", strings.Join(banned, "、"))
 	}
 	return nil
 }
