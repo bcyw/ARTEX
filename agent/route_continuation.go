@@ -626,8 +626,17 @@ func routeForFact(p map[string]any, inherited *Route) *Route {
 		own = &Route{}
 		own.Outcome, _ = p["outcome"].(string)
 	}
-	if routeIdentityFor(own) != "" && (inherited == nil ||
-		routeIdentity(own.Entry, own.Family, own.Component, own.Parameter) != routeIdentity(inherited.Entry, inherited.Family, inherited.Component, inherited.Parameter)) {
+	if routeIdentityFor(own) != "" {
+		if inherited != nil && routeIdentity(own.Entry, own.Family, own.Component, own.Parameter) == routeIdentity(inherited.Entry, inherited.Family, inherited.Component, inherited.Parameter) {
+			// A complete historical fact route only needs the new operation fields.
+			// Do not promote an intent's planned conclusion into a fact outcome.
+			if strings.TrimSpace(own.Method) == "" {
+				own.Method = inherited.Method
+			}
+			if strings.TrimSpace(own.InputLocation) == "" {
+				own.InputLocation = inherited.InputLocation
+			}
+		}
 		return own
 	}
 	if inherited == nil {
@@ -670,12 +679,8 @@ func routeForFact(p map[string]any, inherited *Route) *Route {
 	if strings.TrimSpace(own.NextStep) != "" {
 		out.NextStep = own.NextStep
 	}
-	if own.Outcome != "" {
-		out.Outcome = own.Outcome
-	}
-	if own.Reason != "" {
-		out.Reason = own.Reason
-	}
+	out.Outcome = own.Outcome
+	out.Reason = own.Reason
 	return &out
 }
 
@@ -904,7 +909,7 @@ const (
 func sharedRouteBudget(states map[string]*RouteState, route *Route, requested int) (count, cap, persisted int) {
 	hasExplicit := false
 	for _, candidate := range states {
-		if normalizeRouteEntry(candidate.Entry) != normalizeRouteEntry(route.Entry) || normalizeRoutePart(candidate.Family) != normalizeRoutePart(route.Family) {
+		if !candidate.sharesBudget(route) {
 			continue
 		}
 		count += candidate.Intents
@@ -929,29 +934,57 @@ func sharedRouteBudget(states map[string]*RouteState, route *Route, requested in
 	return count, cap, persisted
 }
 
+func (st *RouteState) sharesBudget(route *Route) bool {
+	return route != nil && normalizeRouteEntry(st.Entry) == normalizeRouteEntry(route.Entry) && normalizeRoutePart(st.Family) == normalizeRoutePart(route.Family)
+}
+
+// Unknown operation fields overlap every value in that dimension. Selectors
+// retain punctuation and case; only methods are case-insensitive.
+func (st *RouteState) coversOperation(route *Route) bool {
+	method, selector := strings.TrimSpace(st.Method), strings.TrimSpace(st.InputLocation)
+	return (method == "" || route.Method == "" || strings.EqualFold(method, route.Method)) &&
+		(selector == "" || route.InputLocation == "" || selector == route.InputLocation)
+}
+
 func (t *ToolSet) routeContinuation(st *RouteState, it intentItem) error {
 	if reason := t.routeTaskStopReason(); reason != "" {
 		return fmt.Errorf("%s", reason)
 	}
+	it.Route = normalizedRoute(it.Route)
+	history := map[string]bool{}
 	// Components and parameter positions distinguish route hypotheses, but may
 	// not multiply the shared entry/mechanism execution budget.
 	if it.Route != nil {
 		states := t.routeStates()
 		count, cap, _ := sharedRouteBudget(states, it.Route, it.RouteCap)
+		combined := &RouteState{ID: routeIdentityFor(it.Route), Cap: cap}
 		for _, candidate := range states {
-			if normalizeRouteEntry(candidate.Entry) == normalizeRouteEntry(it.Route.Entry) && normalizeRoutePart(candidate.Family) == normalizeRoutePart(it.Route.Family) {
-				// A legacy stop has unknown method/selector scope. Refining that
-				// unknown operation cannot silently reopen it. Explicitly distinct
-				// operations retain their own conclusions; global/type stops win.
-				methodMatches := candidate.Method == "" || it.Route.Method == "" || strings.EqualFold(candidate.Method, strings.TrimSpace(it.Route.Method))
-				selectorMatches := candidate.InputLocation == "" || it.Route.InputLocation == "" || candidate.InputLocation == strings.TrimSpace(it.Route.InputLocation)
-				if candidate.Stopped && (candidate.TypeCapReached || candidate.Outcome == routeOutcomeGlobalControl || (methodMatches && selectorMatches)) {
-					return fmt.Errorf("入口/机制路线已确定停止（%s）：操作细分不能重置停止条件", firstNonEmpty(candidate.Reason, candidate.Outcome))
-				}
+			if !candidate.sharesBudget(it.Route) {
+				continue
+			}
+			// A legacy stop has unknown method/selector scope. Refining that
+			// unknown operation cannot silently reopen it. Explicitly distinct
+			// operations retain their own conclusions; global/type stops win.
+			compatible := candidate.coversOperation(it.Route)
+			if candidate.Stopped && (candidate.TypeCapReached || candidate.Outcome == routeOutcomeGlobalControl || compatible) {
+				return fmt.Errorf("入口/机制路线已确定停止（%s）：操作细分不能重置停止条件", firstNonEmpty(candidate.Reason, candidate.Outcome))
+			}
+			// A new hash does not erase the ledger for the same operation with
+			// missing fields. Keep distinct known operations independent, and
+			// retain historical IDs so persisted round snapshots remain valid.
+			refined := compatible && (candidate.Method != it.Route.Method || candidate.InputLocation != it.Route.InputLocation)
+			if candidate.ID == combined.ID || refined {
+				history[candidate.ID] = true
+				combined.Intents += candidate.Intents
+				combined.Tested = appendUnique(combined.Tested, candidate.Tested...)
+				combined.InformationFree = max(combined.InformationFree, candidate.InformationFree)
 			}
 		}
 		if count >= cap {
 			return fmt.Errorf("入口/机制路线已执行 %d/%d 次，达到共享上限", count, cap)
+		}
+		if len(history) > 0 {
+			st = combined
 		}
 	}
 	if st == nil {
@@ -1004,7 +1037,7 @@ func (t *ToolSet) routeContinuation(st *RouteState, it intentItem) error {
 				continue
 			}
 			r := routeFromPayload(p)
-			if r == nil || routeIdentityFor(r) != st.ID {
+			if r == nil || !history[routeIdentityFor(r)] {
 				continue
 			}
 			routeIntents[n.ID] = true

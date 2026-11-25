@@ -361,7 +361,32 @@ type intentTypePayload struct {
 }
 
 func renderIntentTask(intent *db.Node) string {
-	task := fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", string(intent.Payload), intent.ID)
+	body := string(intent.Payload)
+	var payload, route map[string]json.RawMessage
+	var truncated []string
+	// Only summarize the operation fields for display. Keep the stored payload,
+	// route identity and explicit proof intact; node_detail retrieves the originals.
+	if json.Unmarshal(intent.Payload, &payload) == nil && json.Unmarshal(payload["route"], &route) == nil {
+		for _, field := range []string{"method", "input_location"} {
+			var value string
+			if json.Unmarshal(route[field], &value) != nil {
+				continue
+			}
+			if excerpt := routeExcerpt(value); excerpt != value {
+				route[field], _ = json.Marshal(excerpt)
+				truncated = append(truncated, "route."+field)
+			}
+		}
+		if len(truncated) > 0 {
+			payload["route"], _ = json.Marshal(route)
+			rendered, _ := json.Marshal(payload)
+			body = string(rendered)
+		}
+	}
+	task := fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", body, intent.ID)
+	if len(truncated) > 0 {
+		task += fmt.Sprintf("\n【操作字段摘要】%s 已截断（…）；执行或写回前请用 node_detail({\"id\":%d}) 检索完整原值，不要把摘要当作完整操作字段。", strings.Join(truncated, "、"), intent.ID)
+	}
 	var p intentTypePayload
 	if err := json.Unmarshal(intent.Payload, &p); err != nil {
 		return task // 非法 JSON：保持原文渲染，不因解析失败挡住 worker

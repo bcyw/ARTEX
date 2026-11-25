@@ -38,6 +38,7 @@ type operationOverview struct {
 		Method        string `json:"method"`
 		InputLocation string `json:"input_location"`
 		Intents       int    `json:"intents"`
+		Stopped       bool   `json:"stopped"`
 	} `json:"routes"`
 }
 
@@ -171,6 +172,36 @@ func TestOperationRefinementPreservesLegacyStop(t *testing.T) {
 	}
 }
 
+func TestOperationFactDoesNotInheritIntentConclusion(t *testing.T) {
+	for _, fullRoute := range []bool{false, true} {
+		t.Run(fmt.Sprintf("full fact route=%t", fullRoute), func(t *testing.T) {
+			tools := intentTypeToolSet(t)
+			base := map[string]any{"entry": "https://example.test/legacy-conclusion", "family": "parser"}
+			id, err := tools.ts.AddIntent(map[string]any{
+				"summary": "historical intent with an unsupported conclusion",
+				"route":   map[string]any{"entry": base["entry"], "family": base["family"], "outcome": "impact", "method": "POST", "input_location": "body:id"},
+			}, 5, nil, "planner")
+			if err != nil {
+				t.Fatal(err)
+			}
+			worker := NewToolSet(tools.ts, "worker")
+			worker.SetOwnerNode(id)
+			fact := map[string]any{"summary": "only the operation was recovered; no conclusion yet"}
+			if fullRoute {
+				fact["route"] = base
+			}
+			out := operationTool(t, worker.WorkerTools(), "record_fact", fact)
+			if out.IsError {
+				t.Fatal(out.Flatten())
+			}
+			rows := readOperations(t, tools).Routes
+			if len(rows) != 1 || rows[0].Stopped || rows[0].Method != "POST" || rows[0].InputLocation != "body:id" {
+				t.Fatalf("operation recovery invented a fact conclusion or lost identity: %+v", rows)
+			}
+		})
+	}
+}
+
 func TestOperationLegacyMethodRecoveryIsConservative(t *testing.T) {
 	for _, tc := range []struct {
 		name, entry, want string
@@ -231,6 +262,112 @@ func TestOperationRefinementHonorsExecutionControls(t *testing.T) {
 				t.Fatalf("operation refinement bypassed %s: %s", control, out.Flatten())
 			}
 		})
+	}
+}
+
+func TestOperationWhitespaceCannotBypassManualStop(t *testing.T) {
+	for _, op := range []struct{ method, selector string }{
+		{" ", "body:id"},
+		{"POST", " \t"},
+		{" \n", " \t"},
+	} {
+		t.Run(fmt.Sprintf("%q/%q", op.method, op.selector), func(t *testing.T) {
+			tools := intentTypeToolSet(t)
+			route := map[string]any{"entry": "https://example.test/stopped", "family": "parser", "method": "POST", "input_location": "body:id"}
+			created := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "stopped operation", "route": route})
+			if created.IsError {
+				t.Fatal(created.Flatten())
+			}
+			if err := tools.ts.SetIntentState(parseCreatedIntentID(t, created.Flatten()), "stopped"); err != nil {
+				t.Fatal(err)
+			}
+			route["method"], route["input_location"] = op.method, op.selector
+			out := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "unknown scope after trimming", "route": route})
+			if !out.IsError || !strings.Contains(out.Flatten(), "停止") {
+				t.Fatalf("whitespace bypassed stopped operation: %s", out.Flatten())
+			}
+		})
+	}
+}
+
+func TestOperationRefinementKeepsLegacyConsumptionAfterReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-consumption.sqlite")
+	d, err := db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	task, err := d.CreateTask("legacy consumption", "fixture", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := NewToolSet(d.Exploration(task.ExplorationID), "planner")
+	tools.SetTaskID(task.ID)
+	base := map[string]any{"entry": "https://example.test/consumed", "family": "parser"}
+	created := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "old operation", "route": base})
+	if created.IsError {
+		t.Fatal(created.Flatten())
+	}
+	id := parseCreatedIntentID(t, created.Flatten())
+	worker := NewToolSet(tools.ts, "worker")
+	worker.SetOwnerNode(id)
+	result := operationTool(t, worker.WorkerTools(), "record_fact", map[string]any{"summary": "saved control response", "confidence": "observed", "evidence": "control response token=legacy"})
+	if result.IsError {
+		t.Fatal(result.Flatten())
+	}
+	facts, err := tools.ts.FactsYielded(id)
+	if err != nil || len(facts) != 1 {
+		t.Fatalf("facts: %v %v", facts, err)
+	}
+	if err := tools.ts.SetIntentState(id, "done"); err != nil {
+		t.Fatal(err)
+	}
+	tools.SetContinueWork(func(int64, string) error { return nil })
+	continued := operationTool(t, tools.PlannerTools(), "continue_intent", map[string]any{"intent_id": id, "message": "follow saved control", "parent_ids": facts})
+	if continued.IsError {
+		t.Fatal(continued.Flatten())
+	}
+	if err := tools.ts.SetIntentState(id, "done"); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{}
+	for i := 0; i < 3; i++ {
+		provider.add(textTurn("No new evidence.")...)
+	}
+	planner := NewPlanner(provider, "test-model", t.TempDir(), nil, 0, 2)
+	for i := 0; i < 3; i++ {
+		if _, _, err := planner.Plan(t.Context(), task.ID, nil, tools.ts, task.Goal, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d, err = db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools = NewToolSet(d.Exploration(task.ExplorationID), "planner")
+	tools.SetTaskID(task.ID)
+	base["method"], base["input_location"] = "POST", "body:id"
+	for _, parents := range [][]int64{facts, nil} {
+		out := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "refine saved operation", "route": base, "parent_ids": parents})
+		want := "信息"
+		if len(parents) == 0 {
+			want = "连续 3 轮"
+		}
+		if !out.IsError || !strings.Contains(out.Flatten(), want) {
+			t.Errorf("refinement lost consumed evidence/information-free history (parents=%v): %s", parents, out.Flatten())
+		}
+	}
+	// New evidence remains usable; conservative recovery must not ban refinement.
+	fresh, err := tools.ts.AddNode(db.KindFact, map[string]any{"summary": "new control response", "confidence": "observed", "evidence": "control response token=fresh"}, 5, "confirmed", "fixture", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "refine with new observation", "route": base, "parent_ids": []int64{fresh}})
+	if out.IsError {
+		t.Fatalf("new evidence was rejected after recovery: %s", out.Flatten())
 	}
 }
 
@@ -298,15 +435,25 @@ func TestOperationContinuationCannotIncreaseSharedCapAfterReopen(t *testing.T) {
 func TestOperationConcurrentAdmissionSharesLegacyAndRerunBudget(t *testing.T) {
 	tools := intentTypeToolSet(t)
 	entry := "https://example.test/concurrent"
-	_, err := tools.ts.AddIntent(map[string]any{
+	legacyID, err := tools.ts.AddIntent(map[string]any{
 		"summary": "legacy executions", "route_runs": 2,
 		"route": map[string]any{"entry": entry, "family": "parser"},
 	}, 5, nil, "planner")
 	if err != nil {
 		t.Fatal(err)
 	}
+	legacyWorker := NewToolSet(tools.ts, "worker")
+	legacyWorker.SetOwnerNode(legacyID)
+	observed := operationTool(t, legacyWorker.WorkerTools(), "record_fact", map[string]any{"summary": "operation discriminator observed", "confidence": "observed", "evidence": "fixture selector maps to the POST body handler"})
+	if observed.IsError {
+		t.Fatal(observed.Flatten())
+	}
+	legacyFacts, err := tools.ts.FactsYielded(legacyID)
+	if err != nil || len(legacyFacts) != 1 {
+		t.Fatalf("legacy handoff: %v %v", legacyFacts, err)
+	}
 	created := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{
-		"summary": "current operation", "route": map[string]any{"entry": entry, "family": "parser", "method": "POST", "input_location": "body:id"},
+		"summary": "current operation", "parent_ids": legacyFacts, "route": map[string]any{"entry": entry, "family": "parser", "method": "POST", "input_location": "body:id"},
 	})
 	if created.IsError {
 		t.Fatal(created.Flatten())
@@ -335,7 +482,7 @@ func TestOperationConcurrentAdmissionSharesLegacyAndRerunBudget(t *testing.T) {
 			planner.SetTaskID(tools.taskID)
 			planner.SetContinueWork(func(int64, string) error { return nil })
 			name := "add_intent"
-			input := map[string]any{"summary": "refinement", "route_cap": 100, "route": map[string]any{"entry": entry, "family": "parser", "method": "GET", "input_location": fmt.Sprintf("query:item[%d]", i)}}
+			input := map[string]any{"summary": "refinement", "parent_ids": facts, "route_cap": 100, "route": map[string]any{"entry": entry, "family": "parser", "method": "GET", "input_location": fmt.Sprintf("query:item[%d]", i)}}
 			if i == 0 {
 				name, input = "continue_intent", map[string]any{"intent_id": id, "message": "follow observation", "parent_ids": facts, "route_cap": 100}
 			}
