@@ -200,9 +200,9 @@ func (t *ToolSet) technicalResearchIntent() bool {
 }
 
 func (t *ToolSet) currentRunConclusion() bool {
-	// report_finding is already current-worker-owned and validates its evidence;
-	// this count belongs to the ToolSet created for this invocation only.
-	if t.Writes().Findings > 0 {
+	// Only a current-owned finding that actually retained evidence qualifies.
+	// Legacy-compatible evidence-free writes still count as writes, not completion.
+	if t.findingHandoff {
 		return true
 	}
 	ids, err := t.ts.FactsYielded(t.ownerNode)

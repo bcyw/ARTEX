@@ -198,6 +198,20 @@ func TestTrafficGetPagesInlineBodies(t *testing.T) {
 	}
 }
 
+func TestTrafficGetRejectsUndecodableRanges(t *testing.T) {
+	tr, _ := openTraffic(t)
+	tr.record(newFlow("ranges.example.com", "POST", "/range", []byte("request"), []byte("response")))
+	id := onlyExchangeID(t, tr)
+	for _, field := range []string{"offset", "length"} {
+		for _, value := range []json.Number{"9223372036854775808", "-1.0", "-1e0"} {
+			args := map[string]any{"id": id, "side": "response", field: value}
+			if !trafficToolFails(t, tr, "traffic_get", args) {
+				t.Errorf("invalid traffic range was silently accepted: %v", args)
+			}
+		}
+	}
+}
+
 func TestTrafficGetMetaDistinguishesMissingAndEmptyBody(t *testing.T) {
 	tr, _ := openTraffic(t)
 	tr.record(newFlow("empty.example.com", "GET", "/empty", nil, nil))
@@ -397,6 +411,50 @@ func TestTrafficGetReadsLegacyBodiesWithoutExchangeBodyRow(t *testing.T) {
 	}
 	if !bytes.Equal(joined, response) {
 		t.Fatal("legacy response 分页未无损还原")
+	}
+}
+
+func TestTrafficGetReadsLegacyFullHeadersWithoutChangingRawOffsets(t *testing.T) {
+	tr, dir := openTraffic(t)
+	const id, rel = "legacy-headers", "legacy/headers"
+	path := filepath.Join(dir, rel)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fixtures := []struct {
+		side, head, separator, body string
+	}{
+		{"request", "POST /legacy HTTP/1.1\r\nX-Long: " + strings.Repeat("h", 5000), "\r\n\r\n", "request body"},
+		{"response", "HTTP 200\nContent-Type: text/plain", "\n\n", "response body\r\n\r\nnot headers"},
+	}
+	for _, fixture := range fixtures {
+		if err := os.WriteFile(filepath.Join(path, fixture.side+".http"), []byte(fixture.head+fixture.separator+fixture.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tr.DB().Exec(`INSERT INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path) VALUES(?,1,'legacy.example.com','POST','/legacy','http://legacy/legacy',200,'text/plain',0,0,?)`, id, rel); err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.side, func(t *testing.T) {
+			full := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": fixture.side, "header_only": true})
+			if strings.TrimRight(full, "\r\n") != fixture.head {
+				t.Fatalf("legacy header_only did not return the complete stored head: %q", clip(full, 200))
+			}
+			offset := len(fixture.head) + len(fixture.separator)
+			out := toolText(t, tr, "traffic_get", map[string]any{"id": id, "side": fixture.side, "offset": offset, "encoding": "base64"})
+			var page struct {
+				Data string `json:"data"`
+				Next int    `json:"next_offset"`
+			}
+			if err := json.Unmarshal([]byte(out), &page); err != nil {
+				t.Fatal(err, out)
+			}
+			body, err := base64.StdEncoding.DecodeString(page.Data)
+			if err != nil || string(body) != fixture.body || page.Next != offset+len(fixture.body) {
+				t.Fatalf("legacy raw byte offsets changed: page=%+v err=%v", page, err)
+			}
+		})
 	}
 }
 

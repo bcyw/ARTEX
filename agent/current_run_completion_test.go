@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/Autumn-27/norma/llm"
+	"github.com/bcyw/artex/evidence"
+	"github.com/bcyw/artex/traffic"
 )
 
 func TestWorkerTechnicalCompletionCannotBeAnAssetWrite(t *testing.T) {
@@ -120,6 +122,77 @@ func TestWorkerCurrentRunCannotReusePriorConclusionOrEmptyOOB(t *testing.T) {
 				_ = json.Unmarshal(node.Payload, &p)
 				if p["outcome"] != "no_interaction" {
 					t.Fatalf("OOB fixture: %s", node.Payload)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkerFindingCompletionRequiresEvidenceHandoff(t *testing.T) {
+	oldBinding := FindingTrafficBindingEnabled
+	FindingTrafficBindingEnabled = func() bool { return false }
+	t.Cleanup(func() { FindingTrafficBindingEnabled = oldBinding })
+	for _, tc := range []struct {
+		name, evidence string
+		blocker        bool
+		bound          bool
+		complete       bool
+	}{
+		{name: "missing"},
+		{name: "whitespace", evidence: " \n\t"},
+		{name: "text_evidence", evidence: "fixture: local normal/changed inputs and their cross-boundary outputs", complete: true},
+		{name: "bound_traffic", bound: true, complete: true},
+		{name: "specific_blocker", blocker: true, complete: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			FindingTrafficBindingEnabled = func() bool { return tc.bound }
+			tools := intentTypeToolSet(t)
+			created := operationTool(t, tools.PlannerTools(), "add_intent", map[string]any{"summary": "verify local query fixture", "vuln_type": "测试甲类"})
+			if created.IsError {
+				t.Fatal(created.Flatten())
+			}
+			intent, err := tools.ts.GetNode(parseCreatedIntentID(t, created.Flatten()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider := &scriptedProvider{}
+			trafficID := "unverified"
+			worker := NewWorker(provider, "fixture", t.TempDir(), nil, 0, 6)
+			if tc.bound {
+				tr, err := traffic.Open(t.TempDir(), "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = tr.Close() })
+				trafficID, err = tr.ImportBrowser(traffic.BrowserExchange{URL: "https://example.test/query", Method: "POST", Body: "local fixture", Status: 200, ResponseBody: "fixture query result"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				worker.SetFindingRecorder(evidence.New(tools.ts.DB(), tr, t.TempDir()))
+			}
+			provider.add(toolTurn("finding", "report_finding", map[string]any{
+				"severity": "medium", "summary": "local query fixture", "description": "fixture root cause", "impact": "fixture impact", "remediation": "fixture fix", "evidence": tc.evidence,
+				// Disabled binding cannot turn stray model-supplied references into proof.
+				"traffic_refs": []any{map[string]any{"traffic_id": trafficID, "role": "proof"}},
+			})...)
+			if tc.blocker {
+				provider.add(toolTurn("blocker", "record_fact", map[string]any{"summary": "fixture proof unavailable", "experiment": map[string]any{"execution_state": "blocked", "blocker": "the local fixture proof artifact is unavailable", "observation": map[string]any{"state": "incomplete"}}})...)
+			}
+			provider.add(textTurn("handoff finished")...)
+			_, writes, err := worker.Execute(t.Context(), "worker", tools.taskID, nil, tools.ts, intent, nil, nil, nil, nil)
+			if writes.Findings != 1 {
+				t.Fatalf("fixture finding was not persisted: writes=%+v err=%v result=%s", writes, err, provider.lastToolResult)
+			}
+			if tc.complete && err != nil {
+				t.Fatalf("evidence or a specific blocker should complete the handoff: %v", err)
+			}
+			if !tc.complete && (err == nil || !strings.Contains(err.Error(), "finalization failed")) {
+				t.Fatalf("evidence-free finding completed a technical run: %v", err)
+			}
+			if tc.complete {
+				_, laterWrites, laterErr := worker.Execute(t.Context(), "worker", tools.taskID, nil, tools.ts, intent, nil, nil, nil, nil)
+				if laterWrites.Total() != 0 || laterErr == nil || !strings.Contains(laterErr.Error(), "finalization failed") {
+					t.Fatalf("prior-run finding or blocker completed a new run: writes=%+v err=%v", laterWrites, laterErr)
 				}
 			}
 		})

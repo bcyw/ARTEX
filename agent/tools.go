@@ -72,6 +72,10 @@ type ToolSet struct {
 	GoalMet   bool
 	Reason    string
 	writes    WriteCounts
+	// findingHandoff records whether a successful finding write in this invocation
+	// retained PoC text or host-verified traffic bindings. A write count alone is
+	// not an evidence handoff; this does not judge the evidence's semantic truth.
+	findingHandoff bool
 	// killWork, if set, terminates a running work by intent id (engine callback,
 	// wired by the planner). nil = the kill_work tool reports unavailable.
 	killWork func(intentID int64) error
@@ -1662,6 +1666,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			t.notify()
 		}
 		t.writes.Findings++
+		t.findingHandoff = t.findingHandoff || strings.TrimSpace(input.Evidence) != "" || len(recorded.Traffic.Bindings) > 0
 		// Keep the first line's node-ID contract for existing reporter triggers.
 		for i := range recorded.Traffic.Bindings {
 			recorded.Traffic.Bindings[i].Snapshot.ReqHead = ""

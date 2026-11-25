@@ -1130,9 +1130,89 @@ func routeEvidenceIsInformative(n *db.Node) bool {
 	return true
 }
 
-// Content, not a fresh node ID, determines evidence gain. Execution bookkeeping
-// and route hypotheses are deliberately absent from the fingerprint.
+// Host-recorded content, not model wording or a fresh node ID, determines gain.
 var routeObservationNoise = regexp.MustCompile(`(?i)\b(?:nonce|probe(?:_id)?|correlation_id|timestamp)\s*[:=]\s*[^\s,;]+`)
+
+func (t *ToolSet) routeActivityIdentity(raw any) string {
+	basis, _ := raw.(map[string]any)
+	id, _ := basis["id"].(float64)
+	a, err := t.executionActivity(int64(id))
+	if err != nil || a == nil {
+		return ""
+	}
+	input, ok := t.routeActivityInput(a)
+	if !ok {
+		return ""
+	}
+	operation := routeActivityContent(input)
+	if a.Tool == "Read" {
+		// Read recovers evidence material. Copying it to another local file does
+		// not make a new experiment; retain the read range and actual content.
+		if fields, ok := operation.(map[string]any); ok {
+			delete(fields, "file_path")
+		}
+	}
+	content, _ := json.Marshal([]any{a.Tool, operation, routeActivityContent(a.Detail)})
+	return string(content)
+}
+
+// Resolve the immutable call paired with a verified result using host-owned
+// run/tool-use identity. IDs locate the source but never enter the fingerprint.
+func (t *ToolSet) routeActivityInput(result *db.Activity) (string, bool) {
+	if result.NodeID == nil {
+		return "", false
+	}
+	run := activityExecution(*result).Run
+	for cursor := int64(0); cursor < result.ID; {
+		rows, next, err := t.ts.ActivityListWithSources(*result.NodeID, cursor, 300)
+		if err != nil || next <= cursor {
+			return "", false
+		}
+		for _, call := range rows {
+			if call.ID >= result.ID {
+				return "", false
+			}
+			if !call.Inherited && call.Kind == "tool_use" && call.ToolUseID == result.ToolUseID && call.Tool == result.Tool && activityExecution(call).Run == run {
+				input, err := t.ts.ActivityDetailWithSources(call.ID)
+				return input, err == nil && json.Valid([]byte(input))
+			}
+		}
+		cursor = next
+	}
+	return "", false
+}
+
+func routeActivityContent(raw string) any {
+	if !json.Valid([]byte(raw)) {
+		return strings.TrimSpace(routeObservationNoise.ReplaceAllString(raw, ""))
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	_ = decoder.Decode(&value)
+	return routeActivityValue(value)
+}
+
+func routeActivityValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, item := range v {
+			switch strings.ToLower(key) {
+			case "nonce", "probe", "probe_id", "correlation_id", "timestamp":
+				delete(v, key)
+			default:
+				v[key] = routeActivityValue(item)
+			}
+		}
+	case []any:
+		for i, item := range v {
+			v[i] = routeActivityValue(item)
+		}
+	case string:
+		return routeObservationNoise.ReplaceAllString(v, "")
+	}
+	return value
+}
 
 func (t *ToolSet) routeEvidenceSignature(n *db.Node) string {
 	if !routeEvidenceIsInformative(n) {
@@ -1144,9 +1224,14 @@ func (t *ToolSet) routeEvidenceSignature(n *db.Node) string {
 	}
 	var content []string
 	for _, e := range factExperiments(p) {
-		observation := routeObservationNoise.ReplaceAllString(t.supportedObservation(e), "")
-		if observation = strings.Join(strings.Fields(observation), " "); observation != "" {
-			content = appendUnique(content, observation)
+		if t.supportedObservation(e) == "" {
+			continue
+		}
+		observation, _ := e["observation"].(map[string]any)
+		action := t.routeActivityIdentity(e["execution_basis"])
+		result := t.routeActivityIdentity(observation["basis"])
+		if action != "" && result != "" {
+			content = appendUnique(content, action+"\x00"+result)
 		}
 	}
 	if len(content) == 0 {

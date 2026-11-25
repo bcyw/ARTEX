@@ -1116,7 +1116,15 @@ func legacyBodyPart(path string) BodyPart {
 	if err != nil {
 		return BodyPart{Availability: BodyMissing, Warning: "历史流量文件缺失或不可读：" + err.Error()}
 	}
-	return BodyPart{Data: data, Total: int64(len(data)), Availability: BodyLegacy}
+	// Keep Data as the complete raw file so historical paging offsets stay stable.
+	// Only header_only uses Head; legacy captures contain both LF and CRLF heads.
+	head := data
+	for _, separator := range []string{"\r\n\r\n", "\n\n"} {
+		if end := bytes.Index(data, []byte(separator)); end >= 0 && end < len(head) {
+			head = data[:end]
+		}
+	}
+	return BodyPart{Head: string(head), Data: data, Total: int64(len(data)), Availability: BodyLegacy}
 }
 
 func (t *Traffic) newBodyPart(head string, nullBody bool, body []byte, blob sql.NullString, total int64) BodyPart {
@@ -2297,7 +2305,12 @@ func (t *Traffic) Tools() []actool.CoreTool {
 				Encoding   string
 				HeaderOnly bool `json:"header_only"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf(fmt.Sprintf("无效的读取参数：%v", err)), nil
+			}
+			if a.Offset < 0 || a.Length < 0 {
+				return actool.Errorf("offset / length 不能为负数"), nil
+			}
 			if a.Encoding != "" && (a.Encoding != "base64" || a.Side == "") {
 				return actool.Errorf("encoding 仅支持 base64 且必须指定 side"), nil
 			}
