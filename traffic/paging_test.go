@@ -134,6 +134,9 @@ func TestTrafficBlobPagesBinaryBytesLosslessly(t *testing.T) {
 	for _, invalid := range []map[string]any{
 		{"hash": hash, "offset": -1},
 		{"hash": hash, "length": -1},
+		{"hash": hash, "offset": json.Number("-1.0")},
+		{"hash": hash, "length": json.Number("-1e0")},
+		{"hash": hash, "offset": json.Number("9223372036854775808")},
 		{"hash": hash, "offset": len(body) + 1},
 	} {
 		if !trafficToolFails(t, tr, "traffic_blob", invalid) {

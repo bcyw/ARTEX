@@ -2373,7 +2373,9 @@ func (t *Traffic) Tools() []actool.CoreTool {
 				Offset int64
 				Length int64
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf(fmt.Sprintf("无效的 blob 读取参数：%v", err)), nil
+			}
 			if a.Offset < 0 || a.Length < 0 {
 				return actool.Errorf("offset / length 不能为负数"), nil
 			}
