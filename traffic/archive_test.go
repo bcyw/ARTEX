@@ -1,11 +1,62 @@
 package traffic
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestTrafficArchivePreservesBrowserBodyAvailability(t *testing.T) {
+	source, _ := openTraffic(t)
+	restored, _ := openTraffic(t)
+	for _, tc := range []struct {
+		name, body, availability string
+		omitted                  bool
+	}{
+		{"empty", "", "present", false},
+		{"omitted", "", "missing", true},
+		{"content", "observed response", "present", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, err := source.ImportBrowser(BrowserExchange{
+				URL: "https://archive-browser.example/" + tc.name, Method: "GET", Status: 200,
+				ResponseBody: tc.body, ResponseBodyOmitted: tc.omitted,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			archive := t.TempDir()
+			if _, err := source.ExportHosts([]string{"archive-browser.example"}, archive); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := restored.ImportArchive(archive); err != nil {
+				t.Fatal(err)
+			}
+			out := toolText(t, restored, "traffic_get", map[string]any{"id": id, "side": "response", "meta_only": true})
+			var meta struct {
+				Availability string `json:"availability"`
+			}
+			if err := json.Unmarshal([]byte(out), &meta); err != nil || meta.Availability != tc.availability {
+				t.Fatalf("archive changed %s to %s: %v", tc.availability, out, err)
+			}
+			if tc.omitted {
+				if !trafficToolFails(t, restored, "traffic_get", map[string]any{"id": id, "side": "response"}) {
+					t.Fatal("omitted archive body became readable")
+				}
+				return
+			}
+			page := toolText(t, restored, "traffic_get", map[string]any{"id": id, "side": "response", "encoding": "base64"})
+			var decoded struct {
+				Data []byte `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(page), &decoded); err != nil || string(decoded.Data) != tc.body {
+				t.Fatalf("archive changed response bytes: %s (%v)", page, err)
+			}
+		})
+	}
+}
 
 func TestTrafficArchiveRoundTripAndCurrentRowWins(t *testing.T) {
 	trafficDir := t.TempDir()

@@ -34,10 +34,10 @@ type ArchiveExchange struct {
 	ReqLen      int    `json:"req_len"`
 	RespLen     int    `json:"resp_len"`
 	ReqHead     string `json:"req_head"`
-	ReqBody     []byte `json:"req_body,omitempty"`
+	ReqBody     []byte `json:"req_body"`
 	ReqBlob     string `json:"req_blob,omitempty"`
 	RespHead    string `json:"resp_head"`
-	RespBody    []byte `json:"resp_body,omitempty"`
+	RespBody    []byte `json:"resp_body"`
 	RespBlob    string `json:"resp_blob,omitempty"`
 	// RespOmitted is a tri-state carried across archive round trips: nil means an
 	// older archive that never recorded the flag, 1 an omitted body, 0 an
@@ -81,8 +81,9 @@ FROM exchanges WHERE host IN (`+strings.Join(placeholders, ",")+`) ORDER BY ts,i
 		}
 		var reqBlob, respBlob sql.NullString
 		var respOmitted sql.NullInt64
-		err := t.db.QueryRow(`SELECT req_head,req_body,req_blob,resp_head,resp_body,resp_blob,resp_omitted
-FROM exchange_bodies WHERE id=?`, item.ID).Scan(&item.ReqHead, &item.ReqBody, &reqBlob, &item.RespHead, &item.RespBody, &respBlob, &respOmitted)
+		var reqMissing, respMissing bool
+		err := t.db.QueryRow(`SELECT req_head,req_body,req_blob,resp_head,resp_body,resp_blob,resp_omitted,req_body IS NULL,resp_body IS NULL
+FROM exchange_bodies WHERE id=?`, item.ID).Scan(&item.ReqHead, &item.ReqBody, &reqBlob, &item.RespHead, &item.RespBody, &respBlob, &respOmitted, &reqMissing, &respMissing)
 		if errors.Is(err, sql.ErrNoRows) && strings.TrimSpace(legacyPath) != "" {
 			req, readErr := os.ReadFile(filepath.Join(t.dir, legacyPath, "request.http"))
 			if readErr != nil && !os.IsNotExist(readErr) {
@@ -95,6 +96,16 @@ FROM exchange_bodies WHERE id=?`, item.ID).Scan(&item.ReqHead, &item.ReqBody, &r
 			item.ReqHead, item.RespHead = string(req), string(resp)
 		} else if err != nil {
 			return 0, err
+		} else {
+			// SQLite scans both NULL and a zero-length BLOB into nil. Preserve the
+			// distinction in JSON (null versus "") so restore does not lose empty
+			// observations or invent bytes for missing bodies.
+			if !reqMissing && item.ReqBody == nil {
+				item.ReqBody = []byte{}
+			}
+			if !respMissing && item.RespBody == nil {
+				item.RespBody = []byte{}
+			}
 		}
 		item.ReqBlob, item.RespBlob = reqBlob.String, respBlob.String
 		if respOmitted.Valid {

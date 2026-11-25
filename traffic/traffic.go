@@ -2374,12 +2374,18 @@ func (t *Traffic) Tools() []actool.CoreTool {
 				Length int64
 			}
 			_ = json.Unmarshal(in, &a)
+			if a.Offset < 0 || a.Length < 0 {
+				return actool.Errorf("offset / length 不能为负数"), nil
+			}
 			if a.Length <= 0 || a.Length > maxBlobRead {
 				a.Length = maxBlobRead
 			}
 			data, total, err := t.BlobRange(a.Hash, a.Offset, a.Length)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
+			}
+			if a.Offset > total {
+				return actool.Errorf("offset 超出正文长度"), nil
 			}
 			if len(data) == 0 {
 				return actool.Text(fmt.Sprintf("偏移 %d 已超出内容长度（总长 %d 字节）。", a.Offset, total)), nil

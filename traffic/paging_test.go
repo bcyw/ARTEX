@@ -131,6 +131,15 @@ func TestTrafficBlobPagesBinaryBytesLosslessly(t *testing.T) {
 	if !bytes.Equal(joined, body) {
 		t.Fatal("分页未还原二进制 blob 原始字节")
 	}
+	for _, invalid := range []map[string]any{
+		{"hash": hash, "offset": -1},
+		{"hash": hash, "length": -1},
+		{"hash": hash, "offset": len(body) + 1},
+	} {
+		if !trafficToolFails(t, tr, "traffic_blob", invalid) {
+			t.Errorf("invalid blob range was silently accepted: %v", invalid)
+		}
+	}
 }
 
 // Pointer-like text inside a captured body must never become a continuation
