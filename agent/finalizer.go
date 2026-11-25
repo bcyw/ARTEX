@@ -13,6 +13,20 @@ import (
 	"github.com/bcyw/artex/internal/toolrun"
 )
 
+// probeTool reports whether a tool call initiates new external probing — a
+// foreground shell command, an HTTP fetch, an OOB allocation, or a deferred
+// MCP/recipe tool. It is the single source of truth for the worker finalizer's
+// "no new probes during settlement" rule and for any future gates that must
+// distinguish probing from read/writeback. experimentRun.wrap keeps its own,
+// broader exclusion list because graph reads, launch acknowledgements and
+// Sleep are also non-proving there.
+func probeTool(name string) bool {
+	if name == "Bash" || name == "WebFetch" || name == "oob_generate" {
+		return true
+	}
+	return strings.HasPrefix(name, "mcp__") || strings.HasPrefix(name, "recipe__")
+}
+
 func (t *ToolSet) verifyGoal(goal, ev *db.Node) error {
 	if ev.State != "confirmed" {
 		return fmt.Errorf("evidence must be confirmed; task roots and dismissed nodes are not proof")
@@ -126,7 +140,7 @@ func (f *workerFinalizer) PreToolUse(ctx context.Context, n string, in []byte) (
 			name = call.Name
 		}
 	}
-	if f.retries > 0 && (name == "Bash" || name == "WebFetch" || name == "oob_generate" || strings.HasPrefix(name, "mcp__") || strings.HasPrefix(name, "recipe__")) {
+	if f.retries > 0 && probeTool(name) {
 		return true, "当前正在结束收束，不能发起新探测；请读取已有结果、wait/cancel 或写回具体 blocker", nil
 	}
 	if f.base != nil {
@@ -143,7 +157,7 @@ func (f *workerFinalizer) PostToolUse(ctx context.Context, n string, in, out []b
 			f.probed.Store(true)
 		}
 	}
-	if n == "Bash" || n == "WebFetch" || strings.HasPrefix(n, "mcp__") || strings.HasPrefix(n, "recipe__") {
+	if probeTool(n) {
 		f.probed.Store(true)
 	}
 	if f.base != nil {
