@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -46,8 +47,8 @@ func TestOOBPollBoundedWait(t *testing.T) {
 	ls := &liveSession{it: interactor{client: &fakePollClient{}}}
 	start := time.Now()
 	its, err := ls.Poll(300 * time.Millisecond)
-	if err != nil {
-		t.Fatalf("Poll 失败: %v", err)
+	if !errors.Is(err, errNoCompletedPoll) {
+		t.Fatalf("无健康记录的有界窗口应返回 incomplete: %v", err)
 	}
 	if len(its) != 0 {
 		t.Fatalf("无回调应返回空: %v", its)

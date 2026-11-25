@@ -5,8 +5,14 @@
 package oob
 
 import (
+	"bytes"
+	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -63,11 +69,16 @@ func Validate(c Config) error {
 // poller only logs them, which would otherwise make an outage indistinguishable
 // from a healthy empty window; the agent reads this snapshot after each poll.
 type healthState struct {
-	mu     sync.Mutex
-	n      int64
-	err    error
-	lastAt time.Time
-	lastOK time.Time
+	mu          sync.Mutex
+	n           int64
+	err         error
+	lastAt      time.Time
+	lastOK      time.Time
+	current     *pollDelivery
+	inFlight    time.Time
+	stopped     bool
+	pollContext context.Context
+	cancelPoll  context.CancelFunc
 }
 
 func (s *healthState) record(err error) {
@@ -81,22 +92,63 @@ func (s *healthState) record(err error) {
 	s.mu.Unlock()
 }
 
-func (s *healthState) recordOK() {
-	s.mu.Lock()
-	s.lastOK = time.Now()
-	s.err = nil
-	s.mu.Unlock()
-}
-
 func (s *healthState) snapshot() (int64, error, time.Time, time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.current != nil {
+		return s.n, fmt.Errorf("oob: 轮询响应尚未处理完成"), s.current.started, s.lastOK
+	}
+	if !s.inFlight.IsZero() {
+		return s.n, fmt.Errorf("oob: 轮询请求尚未完成"), s.inFlight, s.lastOK
+	}
 	return s.n, s.err, s.lastAt, s.lastOK
 }
 
+// The SDK logs decode/decrypt failures instead of exposing them. A poll is
+// healthy only after its response has been consumed and every advertised
+// interaction has reached the SDK callback, including encrypted Data entries.
+type pollDelivery struct {
+	started  time.Time
+	expected int
+	received int
+}
+
+func (s *healthState) delivered() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.current != nil {
+		s.current.received++
+	}
+}
+
+type pollBody struct {
+	io.ReadCloser
+	state    *healthState
+	delivery *pollDelivery
+	once     sync.Once
+}
+
+func (b *pollBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(func() {
+		b.state.mu.Lock()
+		defer b.state.mu.Unlock()
+		if b.delivery.received != b.delivery.expected {
+			b.state.n++
+			b.state.err = fmt.Errorf("oob: 轮询交互未完整解码 (%d/%d)", b.delivery.received, b.delivery.expected)
+			b.state.lastAt = time.Now()
+		} else {
+			b.state.lastOK = time.Now()
+		}
+		b.state.current = nil
+	})
+	return err
+}
+
 type healthTransport struct {
-	base  http.RoundTripper
-	state *healthState
+	base                http.RoundTripper
+	state               *healthState
+	registrationContext context.Context
 }
 
 func (t *healthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -104,15 +156,74 @@ func (t *healthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	resp, err := base.RoundTrip(req)
 	isPoll := strings.HasSuffix(strings.TrimRight(req.URL.Path, "/"), "/poll")
+	if t.registrationContext != nil && strings.HasSuffix(strings.TrimRight(req.URL.Path, "/"), "/register") {
+		req = req.Clone(t.registrationContext)
+	}
+	if isPoll {
+		t.state.mu.Lock()
+		stopped := t.state.stopped
+		pollContext := t.state.pollContext
+		t.state.mu.Unlock()
+		if stopped {
+			return nil, fmt.Errorf("oob: 轮询已停止")
+		}
+		if pollContext != nil {
+			ctx, cancel := context.WithCancel(req.Context())
+			stop := context.AfterFunc(pollContext, cancel)
+			defer stop()
+			defer cancel()
+			req = req.Clone(ctx)
+		}
+		t.state.mu.Lock()
+		t.state.inFlight = time.Now()
+		t.state.mu.Unlock()
+		defer func() {
+			t.state.mu.Lock()
+			t.state.inFlight = time.Time{}
+			t.state.mu.Unlock()
+		}()
+	}
+	resp, err := base.RoundTrip(req)
 	if isPoll {
 		if err != nil {
 			t.state.record(err)
-		} else if resp != nil && resp.StatusCode >= http.StatusBadRequest {
+		} else if resp != nil && resp.StatusCode != http.StatusOK {
 			t.state.record(fmt.Errorf("oob: 轮询返回 HTTP %d", resp.StatusCode))
 		} else {
-			t.state.recordOK()
+			if resp == nil || resp.Body == nil {
+				err = fmt.Errorf("oob: 轮询响应为空")
+				t.state.record(err)
+				return nil, err
+			}
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			var response *server.PollResponse
+			if readErr == nil {
+				readErr = json.Unmarshal(body, &response)
+			}
+			if readErr == nil && response != nil {
+				var fields map[string]json.RawMessage
+				_ = json.Unmarshal(body, &fields)
+				if fields["data"] == nil && fields["extra"] == nil && fields["tlddata"] == nil {
+					readErr = fmt.Errorf("oob: 响应缺少轮询协议字段")
+				}
+			}
+			if readErr != nil || response == nil {
+				err = fmt.Errorf("oob: 轮询响应未完整解码")
+				t.state.record(err)
+				return nil, err
+			}
+			delivery := &pollDelivery{started: time.Now(), expected: len(response.Data) + len(response.Extra)}
+			for _, data := range response.TLDData {
+				if data != "" {
+					delivery.expected++
+				}
+			}
+			t.state.mu.Lock()
+			t.state.current = delivery
+			t.state.mu.Unlock()
+			resp.Body = &pollBody{ReadCloser: io.NopCloser(bytes.NewReader(body)), state: t.state, delivery: delivery}
 		}
 	}
 	return resp, err
@@ -122,38 +233,32 @@ func (t *healthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // HTTPS transport only: plaintext HTTP fallback is disabled and the transport
 // verifies certificates (the SDK's default transport skips verification).
 func clientOptionsFromConfig(c Config, health *healthState) client.Options {
+	return clientOptionsWithRoots(context.Background(), c, health, nil)
+}
+
+func clientOptionsWithRoots(ctx context.Context, c Config, health *healthState, roots *x509.CertPool) client.Options {
 	opts := retryablehttp.DefaultOptionsSpraying
 	opts.Timeout = 10 * time.Second
-	if health != nil {
-		opts.WrapTransport = func(base http.RoundTripper) http.RoundTripper {
-			if tr, ok := base.(*http.Transport); ok {
-				configureVerification(tr)
-			}
-			return &healthTransport{base: base, state: health}
+	// The polling pump already retries on its next tick. SDK-internal backoff
+	// cannot observe our run cancellation and would delay StopPolling/Close.
+	opts.RetryMax = 0
+	opts.WrapTransport = func(base http.RoundTripper) http.RoundTripper {
+		if tr, ok := base.(*http.Transport); ok {
+			configureVerification(tr)
+			tr.TLSClientConfig.RootCAs = roots
 		}
+		if health != nil {
+			return &healthTransport{base: base, state: health, registrationContext: ctx}
+		}
+		return base
 	}
 	hc := retryablehttp.NewClient(opts)
-	if health == nil {
-		configureVerifiedTLS(hc.HTTPClient)
-		configureVerifiedTLS(hc.HTTPClient2)
-	}
 	return client.Options{
 		ServerURL:           c.ServerURL,
 		Token:               c.Token,
 		DisableHTTPFallback: true,
 		HTTPClient:          hc,
 	}
-}
-
-func configureVerifiedTLS(hc *http.Client) {
-	if hc == nil {
-		return
-	}
-	tr, ok := hc.Transport.(*http.Transport)
-	if !ok {
-		return
-	}
-	configureVerification(tr)
 }
 
 func configureVerification(tr *http.Transport) {
@@ -176,18 +281,39 @@ func configureVerification(tr *http.Transport) {
 
 // Session is one live Interactsh session scoped to a single worker run.
 type Session struct {
-	client *client.Client
-	health *healthState
+	mu       sync.Mutex
+	client   *client.Client
+	health   *healthState
+	polling  bool
+	closed   bool
+	closeErr error
 }
 
 // NewClient builds a live Interactsh session. The private key stays inside the
 // client (in memory) — it is never serialized out by this package.
 func NewClient(c Config) (*Session, error) {
+	return NewClientContext(context.Background(), c)
+}
+
+// NewClientContext allows a cancelled run to interrupt lazy registration.
+func NewClientContext(ctx context.Context, c Config) (*Session, error) {
+	return newClientContext(ctx, c, nil)
+}
+
+// The trust-root seam lets local protocol fixtures use the production client
+// with real certificate validation, without changing system trust or TLS policy.
+func newClientWithRoots(c Config, roots *x509.CertPool) (*Session, error) {
+	return newClientContext(context.Background(), c, roots)
+}
+
+func newClientContext(ctx context.Context, c Config, roots *x509.CertPool) (*Session, error) {
 	if err := Validate(c); err != nil {
 		return nil, err
 	}
 	health := &healthState{}
-	opts := clientOptionsFromConfig(c, health)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	opts := clientOptionsWithRoots(ctx, c, health, roots)
 	cli, err := client.New(&opts)
 	if err != nil {
 		return nil, fmt.Errorf("oob: 创建 Interactsh 客户端失败: %w", err)
@@ -198,6 +324,11 @@ func NewClient(c Config) (*Session, error) {
 // URL returns the canonical interaction hostname for this session.
 func (s *Session) URL() string {
 	if s == nil || s.client == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
 		return ""
 	}
 	return s.client.URL()
@@ -218,7 +349,23 @@ func (s *Session) StartPolling(interval time.Duration, cb func(Interaction)) err
 	if s == nil || s.client == nil {
 		return fmt.Errorf("oob: 会话未初始化")
 	}
-	return s.client.StartPolling(interval, func(i *server.Interaction) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("oob: 会话已关闭")
+	}
+	if s.polling {
+		return fmt.Errorf("oob: 会话已在轮询")
+	}
+	if interval <= 0 {
+		return fmt.Errorf("oob: 轮询间隔必须为正数")
+	}
+	s.health.mu.Lock()
+	s.health.stopped = false
+	s.health.pollContext, s.health.cancelPoll = context.WithCancel(context.Background())
+	s.health.mu.Unlock()
+	err := s.client.StartPolling(interval, func(i *server.Interaction) {
+		s.health.delivered()
 		cb(Interaction{
 			Protocol:  i.Protocol,
 			FullID:    i.FullId,
@@ -227,6 +374,8 @@ func (s *Session) StartPolling(interval time.Duration, cb func(Interaction)) err
 			Timestamp: i.Timestamp,
 		})
 	})
+	s.polling = err == nil
+	return err
 }
 
 // Health returns the cumulative poll-failure count, latest error, when that
@@ -247,6 +396,22 @@ func (s *Session) StopPolling() error {
 	if s == nil || s.client == nil {
 		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopPollingLocked()
+}
+
+func (s *Session) stopPollingLocked() error {
+	if !s.polling {
+		return nil
+	}
+	s.health.mu.Lock()
+	s.health.stopped = true
+	if s.health.cancelPoll != nil {
+		s.health.cancelPoll()
+	}
+	s.health.mu.Unlock()
+	s.polling = false
 	return s.client.StopPolling()
 }
 
@@ -255,5 +420,13 @@ func (s *Session) Close() error {
 	if s == nil || s.client == nil {
 		return nil
 	}
-	return s.client.Close()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return s.closeErr
+	}
+	s.closed = true
+	stopErr := s.stopPollingLocked()
+	s.closeErr = errors.Join(stopErr, s.client.Close())
+	return s.closeErr
 }

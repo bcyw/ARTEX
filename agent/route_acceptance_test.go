@@ -116,7 +116,7 @@ func TestAcceptanceOOBCallbackDoesNotAutoFind(t *testing.T) {
 	// 匹配回调：只落 progress 事实。
 	fs := &fakeSession{url: "nonce.example.test"}
 	fs.interactions = []OOBInteraction{{Protocol: "dns", UniqueID: "probe-1", FullID: "probe-1.nonce.example.test", Remote: "198.51.100.9"}}
-	res, err := worker.oobPoll(fs).Call(t.Context(), json.RawMessage(`{"wait":1}`), nil)
+	res, err := registeredOOBPoll(t, worker, fs, 1).Call(t.Context(), json.RawMessage(`{"wait":1}`), nil)
 	if err != nil || res.IsError {
 		t.Fatalf("oob_poll 失败: %v %s", err, res.Flatten())
 	}

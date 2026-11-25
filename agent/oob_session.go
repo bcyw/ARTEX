@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -76,12 +77,13 @@ func (it *interactor) StopPolling() error {
 // buffer, and Poll drains them (bounded wait via time.Sleep-free deadline
 // check — the official client polls on its own interval).
 type liveSession struct {
-	it     interactor
-	mu     sync.Mutex
-	buf    []OOBInteraction
-	seen   map[string]struct{}
-	closed bool
-	health func() (int64, error, time.Time, time.Time)
+	it      interactor
+	mu      sync.Mutex
+	buf     []OOBInteraction
+	seen    map[string]struct{}
+	closed  bool
+	changed chan struct{}
+	health  func() (int64, error, time.Time, time.Time)
 }
 
 // pollSource is the subset of *oob.Session the live pump needs; tests inject
@@ -109,10 +111,14 @@ func newLiveSessionFrom(mint urlClient, src pollSource, pollInterval time.Durati
 	if src == nil || mint == nil {
 		return nil, fmt.Errorf("oob: 会话未初始化")
 	}
-	ls := &liveSession{it: interactor{client: mint}, seen: make(map[string]struct{})}
+	ls := &liveSession{it: interactor{client: mint}, seen: make(map[string]struct{}), changed: make(chan struct{})}
 	err := src.StartPolling(pollInterval, func(in oob.Interaction) {
 		key := interactionKey(in)
 		ls.mu.Lock()
+		if ls.closed {
+			ls.mu.Unlock()
+			return
+		}
 		if _, dup := ls.seen[key]; dup {
 			ls.mu.Unlock()
 			return
@@ -124,8 +130,10 @@ func newLiveSessionFrom(mint urlClient, src pollSource, pollInterval time.Durati
 			FullID:       in.FullID,
 			Remote:       in.Remote,
 			Raw:          in.Raw,
-			TimestampISO: in.Timestamp.UTC().Format(time.RFC3339),
+			TimestampISO: in.Timestamp.UTC().Format(time.RFC3339Nano),
 		})
+		close(ls.changed)
+		ls.changed = make(chan struct{})
 		ls.mu.Unlock()
 	})
 	if err != nil {
@@ -142,10 +150,19 @@ func interactionKey(in oob.Interaction) string {
 }
 
 func (ls *liveSession) Generate() (string, string, error) {
-	if ls.isClosed() {
-		return "", "", fmt.Errorf("oob: 会话已关闭，请让本次 run 分配新的回调地址")
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if ls.closed {
+		return "", "", errSessionClosed
 	}
 	return ls.it.Generate()
+}
+
+func (ls *liveSession) GenerateContext(ctx context.Context) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+	return ls.Generate()
 }
 
 // probeIDForInteraction maps an interaction back to the first DNS label issued
@@ -186,27 +203,44 @@ func rawInteractionHost(raw string) string {
 // A service failure recorded during the window is returned as an error so the
 // tool records service_unavailable instead of a false no_interaction.
 func (ls *liveSession) Poll(wait time.Duration) ([]OOBInteraction, error) {
-	deadline := time.Now().Add(wait)
+	return ls.PollContext(context.Background(), wait)
+}
+
+func (ls *liveSession) PollContext(ctx context.Context, wait time.Duration) ([]OOBInteraction, error) {
 	start := time.Now()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	expired := false
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		ls.mu.Lock()
+		if ls.closed {
+			ls.mu.Unlock()
+			return nil, errSessionClosed
+		}
 		if len(ls.buf) > 0 {
 			out := ls.buf
 			ls.buf = nil
 			ls.mu.Unlock()
 			return out, nil
 		}
-		ls.mu.Unlock()
-		if ls.isClosed() {
-			return nil, errSessionClosed
+		if ls.changed == nil {
+			ls.changed = make(chan struct{})
 		}
-		if time.Now().After(deadline) {
-			if ls.health == nil {
-				return nil, nil
-			}
+		changed := ls.changed
+		ls.mu.Unlock()
+		if expired {
 			return nil, ls.pollWindowHealth(start)
 		}
-		time.Sleep(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-changed:
+		case <-timer.C:
+			expired = true
+		}
 	}
 }
 
@@ -216,8 +250,13 @@ var (
 )
 
 func (ls *liveSession) pollWindowHealth(since time.Time) error {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if ls.closed {
+		return errSessionClosed
+	}
 	if ls.health == nil {
-		return nil
+		return errNoCompletedPoll
 	}
 	_, err, lastErrAt, lastOK := ls.health()
 	if err != nil && lastErrAt.After(since) {
@@ -235,6 +274,13 @@ func (ls *liveSession) isClosed() bool {
 	return ls.closed
 }
 
+func (ls *liveSession) checkOpen() error {
+	if ls.isClosed() {
+		return errSessionClosed
+	}
+	return nil
+}
+
 // Close stops polling then closes the client (官方契约：先 StopPolling 再 Close)。
 func (ls *liveSession) Close() error {
 	if ls == nil {
@@ -246,6 +292,10 @@ func (ls *liveSession) Close() error {
 		return nil
 	}
 	ls.closed = true
+	ls.buf = nil
+	if ls.changed != nil {
+		close(ls.changed)
+	}
 	ls.mu.Unlock()
 	_ = ls.it.StopPolling()
 	return ls.it.Close()
@@ -257,8 +307,7 @@ func oobTools(sess oobSession) []actool.CoreTool {
 	if sess == nil {
 		return nil
 	}
-	tsx := &ToolSet{}
-	return []actool.CoreTool{tsx.oobGenerate(sess), tsx.oobPoll(sess)}
+	return oobToolsForRun(&ToolSet{}, sess)
 }
 
 // lazySession defers the Interactsh registration until the first OOB tool call.
@@ -266,52 +315,122 @@ func oobTools(sess oobSession) []actool.CoreTool {
 // Creation is shared across the run and errors are retried on the next call;
 // no path falls back to another server.
 type lazySession struct {
-	mu     sync.Mutex
-	new    func() (*oob.Session, error)
-	live   *liveSession
-	closed bool
+	mu                 sync.Mutex
+	new                func(context.Context) (*oob.Session, error)
+	live               *liveSession
+	closed             bool
+	creating           chan struct{}
+	cancelRegistration context.CancelFunc
 }
 
 func newLazySession(cfg oob.Config) *lazySession {
-	return &lazySession{new: func() (*oob.Session, error) { return oob.NewClient(cfg) }}
+	return &lazySession{new: func(ctx context.Context) (*oob.Session, error) { return oob.NewClientContext(ctx, cfg) }}
 }
 
-func (l *lazySession) ensure() (*liveSession, error) {
+func (l *lazySession) ensure(ctx context.Context) (*liveSession, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.closed {
-		return nil, fmt.Errorf("oob: 会话已关闭")
+		l.mu.Unlock()
+		return nil, errSessionClosed
+	}
+	if err := ctx.Err(); err != nil {
+		l.mu.Unlock()
+		return nil, err
 	}
 	if l.live != nil {
-		return l.live, nil
+		live := l.live
+		l.mu.Unlock()
+		return live, nil
 	}
-	s, err := l.new()
-	if err != nil {
-		return nil, err
+	if l.creating != nil {
+		done := l.creating
+		l.mu.Unlock()
+		select {
+		case <-done:
+			return l.ensure(ctx)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
-	live, err := newLiveSession(s, 3*time.Second)
+	registration, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	l.creating, l.cancelRegistration = done, cancel
+	l.mu.Unlock()
+	s, err := l.new(registration)
+	cancel()
+	l.mu.Lock()
+	if l.closed {
+		err = errSessionClosed
+	} else if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	var live *liveSession
+	if err == nil {
+		live, err = newLiveSession(s, 3*time.Second)
+		if err == nil {
+			l.live = live
+		}
+	}
+	l.mu.Unlock()
 	if err != nil {
 		_ = s.Close()
-		return nil, err
 	}
-	l.live = live
-	return live, nil
+	l.mu.Lock()
+	l.creating, l.cancelRegistration = nil, nil
+	close(done)
+	l.mu.Unlock()
+	return live, err
 }
 
 func (l *lazySession) Generate() (string, string, error) {
-	live, err := l.ensure()
+	return l.GenerateContext(context.Background())
+}
+
+func (l *lazySession) GenerateContext(ctx context.Context) (string, string, error) {
+	live, err := l.ensure(ctx)
 	if err != nil {
 		return "", "", err
 	}
-	return live.Generate()
+	return live.GenerateContext(ctx)
 }
 
 func (l *lazySession) Poll(wait time.Duration) ([]OOBInteraction, error) {
-	live, err := l.ensure()
+	return l.PollContext(context.Background(), wait)
+}
+
+func (l *lazySession) PollContext(ctx context.Context, wait time.Duration) ([]OOBInteraction, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	live, err := l.ensure(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return live.Poll(wait)
+	return live.PollContext(ctx, wait)
+}
+
+func (l *lazySession) checkOpen() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return errSessionClosed
+	}
+	if l.live == nil {
+		return errNoCompletedPoll
+	}
+	return l.live.checkOpen()
+}
+
+func (l *lazySession) pollWindowHealth(since time.Time) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return errSessionClosed
+	}
+	if l.live == nil {
+		return errNoCompletedPoll
+	}
+	return l.live.pollWindowHealth(since)
 }
 
 func (l *lazySession) Close() error {
@@ -320,12 +439,23 @@ func (l *lazySession) Close() error {
 	}
 	l.mu.Lock()
 	if l.closed {
+		done := l.creating
 		l.mu.Unlock()
+		if done != nil {
+			<-done
+		}
 		return nil
 	}
 	l.closed = true
+	if l.cancelRegistration != nil {
+		l.cancelRegistration()
+	}
+	done := l.creating
 	live := l.live
 	l.mu.Unlock()
+	if done != nil {
+		<-done
+	}
 	if live != nil {
 		return live.Close()
 	}

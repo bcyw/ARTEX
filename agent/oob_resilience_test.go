@@ -29,6 +29,13 @@ func (p *prefixSession) Generate() (string, string, error) {
 	return p.prefix, p.fakeSession.url, nil
 }
 
+func (p *prefixSession) GenerateContext(ctx context.Context) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+	return p.Generate()
+}
+
 // deliverFake 是可注入交互的会话替身：delay 后投递 interactions（每条可能
 // 重复投递 dedup 次），用于驱动 liveSession 的轮询泵回调。
 type deliverFake struct {
@@ -121,8 +128,8 @@ func TestSessionsAreIsolatedPerFactoryCall(t *testing.T) {
 	}
 	defer c1()
 	defer c2()
-	id1, host1, _ := s1.Generate()
-	id2, host2, _ := s2.Generate()
+	id1, host1, _ := s1.GenerateContext(t.Context())
+	id2, host2, _ := s2.GenerateContext(t.Context())
 	if id1 == id2 || host1 == host2 {
 		t.Fatalf("不同 run 的会话应产出不同探测地址: %s vs %s", host1, host2)
 	}
@@ -206,7 +213,7 @@ func TestClosedSessionNotReusableAfterRestart(t *testing.T) {
 func TestOOBPollServiceUnavailableHintsSelfHost(t *testing.T) {
 	// 公共服务故障的提示语应包含自建/重试建议。
 	fs := &fakeSession{url: "xxxx.oast.pro", err: context.DeadlineExceeded}
-	res, err := (&ToolSet{}).oobPoll(fs).Call(t.Context(), json.RawMessage(`{"wait":1}`), nil)
+	res, err := registeredOOBPoll(t, &ToolSet{}, fs, 1).Call(t.Context(), json.RawMessage(`{"wait":1}`), nil)
 	if err != nil || res.IsError {
 		t.Fatalf("服务不可用应作为明确结果返回: %v %s", err, res.Flatten())
 	}
@@ -234,10 +241,10 @@ func TestOOBFactOmitsRawInteractionBody(t *testing.T) {
 	}
 	worker.SetOwnerNode(intentID)
 	fs := &fakeSession{url: "xxxx.oast.pro", interactions: []OOBInteraction{{
-		Protocol: "dns", UniqueID: "p1", FullID: "p1.xxxx.oast.pro",
-		Remote: "192.0.2.1", Raw: "A? p1.xxxx.oast.pro CLASSIFIED-INTERNAL-DATA",
+		Protocol: "dns", UniqueID: "probe-1", FullID: "probe-1.xxxx.oast.pro",
+		Remote: "192.0.2.1", Raw: "A? probe-1.xxxx.oast.pro CLASSIFIED-INTERNAL-DATA",
 	}}}
-	res, err := worker.oobPoll(fs).Call(t.Context(), json.RawMessage(`{"wait":1}`), nil)
+	res, err := registeredOOBPoll(t, worker, fs, 1).Call(t.Context(), json.RawMessage(`{"wait":1}`), nil)
 	if err != nil || res.IsError {
 		t.Fatalf("oob_poll 失败: %v %s", err, res.Flatten())
 	}

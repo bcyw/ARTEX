@@ -314,7 +314,7 @@ func TestRouteContinuesAfterOOBEvidenceAndStopsOnThreeInformationFreeRounds(t *t
 	worker.SetTaskID(tools.taskID)
 	session := &fakeSession{url: "nonce.example.test"}
 	session.interactions = []OOBInteraction{{Protocol: "dns", UniqueID: "probe-1", Remote: "198.51.100.9"}}
-	pollResult, err := worker.oobPoll(session).Call(t.Context(), json.RawMessage(`{"wait":1}`), nil)
+	pollResult, err := registeredOOBPoll(t, worker, session, 1).Call(t.Context(), json.RawMessage(`{"wait":1}`), nil)
 	if err != nil || pollResult.IsError {
 		t.Fatalf("oob_poll 失败: %v %s", err, pollResult.Flatten())
 	}

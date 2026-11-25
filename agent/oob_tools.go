@@ -2,16 +2,17 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/bcyw/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/bcyw/artex/db"
 )
 
 // 票据 01：oob_generate / oob_poll 两个 worker 工具。
@@ -30,10 +31,12 @@ type OOBInteraction struct {
 
 // oobSession is the seam between the tools and the Interactsh client.
 type oobSession interface {
-	// Generate returns (probeID, canonicalHost) for one fresh callback address.
-	Generate() (string, string, error)
-	// Poll waits up to `wait` for new interactions and returns them.
-	Poll(wait time.Duration) ([]OOBInteraction, error)
+	// GenerateContext returns (probeID, canonicalHost) for one fresh callback address.
+	GenerateContext(ctx context.Context) (string, string, error)
+	// PollContext waits up to `wait` for new interactions, interruptible by ctx.
+	PollContext(ctx context.Context, wait time.Duration) ([]OOBInteraction, error)
+	checkOpen() error
+	pollWindowHealth(since time.Time) error
 	Close() error
 }
 
@@ -46,18 +49,132 @@ const (
 // oobSeededTools 构造 OOB 工具的「seed 目录壳」：nil 会话版本，只用于
 // toolcatalog 读 Name/Description/Schema 入库播种，绝不 Call。
 func (t *ToolSet) oobSeededTools() []actool.CoreTool {
-	return []actool.CoreTool{t.oobGenerate(nil), t.oobPoll(nil)}
+	return []actool.CoreTool{t.oobGenerate(nil, nil), t.oobPoll(nil, nil)}
+}
+
+// probeRegistry belongs to one assembled run, never to a task or intent that
+// may be resumed later. It also serializes tool writes for this run.
+type probeRegistry struct {
+	gate      chan struct{}
+	allocated map[string]struct{}
+	pending   []OOBInteraction
+	seen      map[string]struct{}
+	ignored   int
+	runID     string
+	window    uint64
+}
+
+func (r *probeRegistry) acquire(ctx context.Context) error {
+	if r == nil {
+		return errNoCompletedPoll
+	}
+	select {
+	case r.gate <- struct{}{}:
+		return nil
+	default:
+	}
+	select {
+	case r.gate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *probeRegistry) release() { <-r.gate }
+
+type oobObservation struct {
+	Phase           string   `json:"phase"`
+	RunID           string   `json:"run_id"`
+	ProbeIDs        []string `json:"probe_ids"`
+	WindowID        string   `json:"window_id,omitempty"`
+	StartedAt       string   `json:"started_at,omitempty"`
+	EndedAt         string   `json:"ended_at,omitempty"`
+	RequestedWaitMS int64    `json:"requested_wait_ms,omitempty"`
+	Complete        bool     `json:"complete"`
+}
+
+func (r *probeRegistry) observation(probeID string, wait time.Duration) oobObservation {
+	ids := make([]string, 0, len(r.allocated))
+	for id := range r.allocated {
+		if probeID == "" || probeID == id {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	r.window++
+	return oobObservation{
+		Phase: "observation", RunID: r.runID, ProbeIDs: ids,
+		WindowID:  fmt.Sprintf("%s/%d", r.runID, r.window),
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano), RequestedWaitMS: wait.Milliseconds(),
+	}
+}
+
+// observe preserves other probes' callbacks while the selected window runs.
+// A buffered callback can establish progress, but cannot complete an empty
+// observation for another probe. Health covers the entire original window.
+func (r *probeRegistry) observe(ctx context.Context, s oobSession, probeID string, wait time.Duration) ([]OOBInteraction, error) {
+	start := time.Now()
+	deadline := start.Add(wait)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := s.checkOpen(); err != nil {
+			return nil, err
+		}
+		selected := make([]OOBInteraction, 0)
+		remaining := make([]OOBInteraction, 0)
+		for _, it := range r.pending {
+			if probeID == "" || it.UniqueID == probeID {
+				selected = append(selected, it)
+			} else {
+				remaining = append(remaining, it)
+			}
+		}
+		r.pending = remaining
+		if len(selected) > 0 {
+			return selected, nil
+		}
+		if time.Now().After(deadline) {
+			return selected, s.pollWindowHealth(start)
+		}
+		its, err := s.PollContext(ctx, wait)
+		for _, it := range its {
+			if _, owned := r.allocated[it.UniqueID]; !owned {
+				r.ignored++
+				continue
+			}
+			key := strings.Join([]string{it.Protocol, it.UniqueID, it.FullID, it.Remote, it.TimestampISO}, "|")
+			if _, duplicate := r.seen[key]; duplicate {
+				continue
+			}
+			r.seen[key] = struct{}{}
+			r.pending = append(r.pending, it)
+		}
+		if err != nil {
+			return nil, err
+		}
+		wait = time.Until(deadline)
+	}
 }
 
 // oobGenerate issues fresh callback addresses. count defaults to 1, max 5.
-func (t *ToolSet) oobGenerate(s oobSession) actool.CoreTool {
+func (t *ToolSet) oobGenerate(s oobSession, reg *probeRegistry) actool.CoreTool {
 	return actool.Build(actool.Spec{
 		Name:        "oob_generate",
 		Description: "生成本次执行专用的带外（OOB）回调地址（Interactsh）。用于反序列化、SSRF、SSTI/XXE/文件读取等需要带外确认的验证：把回调域名嵌进 payload 发给目标，再用 oob_poll 查是否收到回调。地址仅本 run 有效；一条验证需要多个独立探测时才生成多个，默认 1 个。",
 		Schema: obj(map[string]any{
 			"count": map[string]any{"type": "integer", "description": "生成个数，默认 1，最多 5"},
 		}),
-		Run: func(_ context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+		Run: func(ctx context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+			if err := reg.acquire(ctx); err != nil {
+				return jsonResult(map[string]any{"status": "observation_incomplete", "probes": []any{}, "error": err.Error()})
+			}
+			defer reg.release()
+			if err := ctx.Err(); err != nil {
+				return jsonResult(map[string]any{"status": "observation_incomplete", "probes": []any{}, "error": err.Error()})
+			}
 			var a struct {
 				Count int `json:"count"`
 			}
@@ -70,9 +187,14 @@ func (t *ToolSet) oobGenerate(s oobSession) actool.CoreTool {
 			}
 			probes := make([]map[string]string, 0, a.Count)
 			for i := 0; i < a.Count; i++ {
-				id, host, err := s.Generate()
+				id, host, err := s.GenerateContext(ctx)
 				if err != nil {
-					if saveErr := t.recordOOBUnavailable(err); saveErr != nil {
+					if errors.Is(err, errSessionClosed) || ctx.Err() != nil {
+						return jsonResult(map[string]any{
+							"probes": probes, "status": "observation_incomplete", "error": err.Error(),
+						})
+					}
+					if saveErr := t.recordOOBUnavailable(err, oobObservation{Phase: "allocation", RunID: reg.runID}); saveErr != nil {
 						return actool.Errorf(err.Error()), nil
 					}
 					return jsonResult(map[string]any{
@@ -81,6 +203,7 @@ func (t *ToolSet) oobGenerate(s oobSession) actool.CoreTool {
 						"error":  err.Error(),
 					})
 				}
+				reg.allocated[id] = struct{}{}
 				probes = append(probes, map[string]string{"probe_id": id, "url": host, "domain": host, "http_url": "http://" + host})
 			}
 			return jsonResult(map[string]any{
@@ -92,9 +215,7 @@ func (t *ToolSet) oobGenerate(s oobSession) actool.CoreTool {
 }
 
 // oobPoll waits (bounded) for OOB callbacks and returns them.
-func (t *ToolSet) oobPoll(s oobSession) actool.CoreTool {
-	var mu sync.Mutex
-	var pending []OOBInteraction
+func (t *ToolSet) oobPoll(s oobSession, reg *probeRegistry) actool.CoreTool {
 	return actool.Build(actool.Spec{
 		Name:        "oob_poll",
 		Description: "等待并返回带外回调（配合 oob_generate）。轮询有界等待；只有健康完成的观察窗口才敢下'暂无回调'的结论——服务不可用会明确报 service_unavailable，不要把故障当成目标无漏洞。匹配回调和本轮空窗口会作为带外/否定事实自动写回当前意图；回调只是中间证据，仍需继续验证实际危害，不自动生成 finding 或 severity。",
@@ -102,14 +223,31 @@ func (t *ToolSet) oobPoll(s oobSession) actool.CoreTool {
 			"probe_id": str("可选：仅返回指定探测的交互，其他探测交互保留供后续查询"),
 			"wait":     map[string]any{"type": "integer", "description": fmt.Sprintf("等待秒数，默认 %d，最多 %d", int(oobDefaultWait.Seconds()), int(oobMaxWait.Seconds()))},
 		}),
-		Run: func(_ context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
-			mu.Lock()
-			defer mu.Unlock()
+		Run: func(ctx context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+			if err := reg.acquire(ctx); err != nil {
+				return jsonResult(map[string]any{"status": "observation_incomplete", "interactions": []OOBInteraction{}, "error": err.Error()})
+			}
+			defer reg.release()
 			var a struct {
 				Wait    int    `json:"wait"`
 				ProbeID string `json:"probe_id"`
 			}
 			_ = json.Unmarshal(in, &a)
+			if a.ProbeID != "" {
+				if _, ok := reg.allocated[a.ProbeID]; !ok {
+					return jsonResult(map[string]any{
+						"status": "unknown_probe", "probe_id": a.ProbeID,
+						"interactions": []OOBInteraction{},
+						"hint":         "该 probe 不属于本次 run；请用 oob_generate 分配新地址，再执行触发动作。",
+					})
+				}
+			}
+			if len(reg.allocated) == 0 {
+				return jsonResult(map[string]any{
+					"status": "observation_incomplete", "interactions": []OOBInteraction{},
+					"hint": "本次 run 尚未分配 probe，不能形成有效观察窗口。",
+				})
+			}
 			wait := oobDefaultWait
 			if a.Wait > 0 {
 				if a.Wait > int(oobMaxWait.Seconds()) {
@@ -117,18 +255,23 @@ func (t *ToolSet) oobPoll(s oobSession) actool.CoreTool {
 				}
 				wait = time.Duration(a.Wait) * time.Second
 			}
-			its, err := s.Poll(wait)
+			ignoredBefore := reg.ignored
+			observation := reg.observation(a.ProbeID, wait)
+			its, err := reg.observe(ctx, s, a.ProbeID, wait)
+			observation.EndedAt = time.Now().UTC().Format(time.RFC3339Nano)
 			if err != nil {
 				outcome := "service_unavailable"
 				summary := "OOB 服务不可用，本轮未证明目标无漏洞"
-				if errors.Is(err, errNoCompletedPoll) || errors.Is(err, errSessionClosed) {
+				if errors.Is(err, errNoCompletedPoll) || errors.Is(err, errSessionClosed) || ctx.Err() != nil {
 					outcome = "observation_incomplete"
 					summary = "OOB 观察窗口未完成，不能判断是否有回调"
 				}
 				out := map[string]any{
-					"interactions": []OOBInteraction{},
-					"status":       outcome,
-					"error":        err.Error(),
+					"interactions":         []OOBInteraction{},
+					"status":               outcome,
+					"error":                err.Error(),
+					"ignored_interactions": reg.ignored - ignoredBefore,
+					"observation":          observation,
 				}
 				switch {
 				case errors.Is(err, errSessionClosed):
@@ -138,26 +281,18 @@ func (t *ToolSet) oobPoll(s oobSession) actool.CoreTool {
 				case outcome == "observation_incomplete":
 					out["hint"] = "观察窗口内没有完成一次轮询，常由 OOB 服务故障引起；可稍后重试，或配置自建 Interactsh 服务（config.json 的 oob 块）。"
 				}
-				if id, saveErr := t.recordOOBOutcome(outcome, summary, "", err.Error()); saveErr == nil && id > 0 {
+				if id, saveErr := t.recordOOBOutcome(outcome, summary, "", err.Error(), observation); saveErr == nil && id > 0 {
 					out["fact_id"] = id
 				}
 				return jsonResult(out)
 			}
-			pending = append(pending, its...)
-			its = []OOBInteraction{}
-			remaining := make([]OOBInteraction, 0)
-			for _, interaction := range pending {
-				if a.ProbeID == "" || interaction.UniqueID == a.ProbeID {
-					its = append(its, interaction)
-				} else {
-					remaining = append(remaining, interaction)
-				}
-			}
-			pending = remaining
+			observation.Complete = len(its) == 0
 			out := map[string]any{
-				"interactions": its,
-				"status":       "ok",
-				"count":        strconv.Itoa(len(its)),
+				"interactions":         its,
+				"status":               "ok",
+				"count":                strconv.Itoa(len(its)),
+				"ignored_interactions": reg.ignored - ignoredBefore,
+				"observation":          observation,
 			}
 			outcome := "no_interaction"
 			summary := "OOB 观察窗口内暂无回调（不代表目标无漏洞）"
@@ -171,7 +306,7 @@ func (t *ToolSet) oobPoll(s oobSession) actool.CoreTool {
 			if len(its) > 0 {
 				evidence = detail
 			}
-			if id, saveErr := t.recordOOBOutcome(outcome, summary, detail, evidence); saveErr == nil && id > 0 {
+			if id, saveErr := t.recordOOBOutcome(outcome, summary, detail, evidence, observation); saveErr == nil && id > 0 {
 				out["fact_id"] = id
 			}
 			return jsonResult(out)
@@ -198,17 +333,20 @@ func oobToolsForRun(t *ToolSet, s oobSession) []actool.CoreTool {
 	if s == nil || t == nil {
 		return nil
 	}
-	return []actool.CoreTool{t.oobGenerate(s), t.oobPoll(s)}
+	reg := &probeRegistry{gate: make(chan struct{}, 1), allocated: make(map[string]struct{}), seen: make(map[string]struct{}), runID: rand.Text()}
+	return []actool.CoreTool{t.oobGenerate(s, reg), t.oobPoll(s, reg)}
 }
 
 // recordOOBOutcome persists one handler-owned route fact while retaining the
 // worker's intent. It deliberately stores interaction metadata only: raw
 // callback bodies may contain target data or secrets and remain in the trace.
-func (t *ToolSet) recordOOBOutcome(outcome, summary, detail, evidence string) (int64, error) {
+func (t *ToolSet) recordOOBOutcome(outcome, summary, detail, evidence string, observation oobObservation) (int64, error) {
 	if t == nil || t.ts == nil || t.ownerNode <= 0 {
 		return 0, nil
 	}
 	payload := map[string]any{
+		"intent_id":  t.ownerNode,
+		"oob":        observation,
 		"summary":    summary,
 		"detail":     detail,
 		"confidence": "observed",
@@ -242,11 +380,11 @@ func (t *ToolSet) recordOOBOutcome(outcome, summary, detail, evidence string) (i
 	return id, nil
 }
 
-func (t *ToolSet) recordOOBUnavailable(err error) error {
+func (t *ToolSet) recordOOBUnavailable(err error, observation oobObservation) error {
 	if t == nil || t.ts == nil || t.ownerNode <= 0 {
 		return nil
 	}
-	if _, saveErr := t.recordOOBOutcome("service_unavailable", "OOB 服务不可用，本轮未证明目标无漏洞", "", err.Error()); saveErr != nil {
+	if _, saveErr := t.recordOOBOutcome("service_unavailable", "OOB 服务不可用，本轮未证明目标无漏洞", "", err.Error(), observation); saveErr != nil {
 		return saveErr
 	}
 	return nil

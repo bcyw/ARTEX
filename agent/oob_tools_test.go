@@ -3,9 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	actool "github.com/Autumn-27/norma/tool"
 )
 
 // 票据 01：oob_generate / oob_poll 工具接缝测试。
@@ -24,14 +27,43 @@ func (f *fakeSession) Generate() (id, host string, err error) {
 	if f.generateErr != nil {
 		return "", "", f.generateErr
 	}
-	id = "u" + strings.Repeat("n", len(f.generated)+1)
+	id = fmt.Sprintf("probe-%d", len(f.generated)+1)
 	f.generated = append(f.generated, id)
 	return id, f.url, nil
 }
 
-func (f *fakeSession) Poll(wait time.Duration) ([]OOBInteraction, error) {
-	return f.interactions, f.err
+func (f *fakeSession) GenerateContext(ctx context.Context) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+	return f.Generate()
 }
+
+func (f *fakeSession) Poll(wait time.Duration) ([]OOBInteraction, error) {
+	its := f.interactions
+	f.interactions = nil
+	return its, f.err
+}
+
+func (f *fakeSession) PollContext(ctx context.Context, wait time.Duration) ([]OOBInteraction, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	its, err := f.Poll(wait)
+	if len(its) == 0 && err == nil {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return its, err
+}
+
+func (f *fakeSession) checkOpen() error                 { return nil }
+func (f *fakeSession) pollWindowHealth(time.Time) error { return f.err }
 
 func (f *fakeSession) Close() error { return nil }
 
@@ -44,9 +76,18 @@ func decode(t *testing.T, raw string) map[string]any {
 	return m
 }
 
+// Existing observation fixtures must allocate their probes through the same
+// public tools as a worker, rather than bypassing run ownership.
+func registeredOOBPoll(t *testing.T, worker *ToolSet, s oobSession, count int) actool.CoreTool {
+	t.Helper()
+	tools := oobToolsForRun(worker, s)
+	callOOB(t, tools, "oob_generate", t.Context(), fmt.Sprintf(`{"count":%d}`, count))
+	return tools[1]
+}
+
 func TestOOBGenerateDefaultOneAddress(t *testing.T) {
 	fs := &fakeSession{url: "xxxx.oast.pro"}
-	tool := (&ToolSet{}).oobGenerate(fs)
+	tool := oobToolsForRun(&ToolSet{}, fs)[0]
 	res, err := tool.Call(context.Background(), json.RawMessage(`{}`), nil)
 	if err != nil {
 		t.Fatalf("oob_generate 失败: %v", err)
@@ -70,7 +111,7 @@ func TestOOBGenerateDefaultOneAddress(t *testing.T) {
 
 func TestOOBGenerateMaxFive(t *testing.T) {
 	fs := &fakeSession{url: "xxxx.oast.pro"}
-	tool := (&ToolSet{}).oobGenerate(fs)
+	tool := oobToolsForRun(&ToolSet{}, fs)[0]
 	res, err := tool.Call(context.Background(), json.RawMessage(`{"count":6}`), nil)
 	if err != nil {
 		t.Fatalf("count 超限应返回错误结果而非 Go error: %v", err)
@@ -99,7 +140,7 @@ func TestOOBGenerateServiceUnavailable(t *testing.T) {
 	}
 	worker.SetOwnerNode(intentID)
 	fs := &fakeSession{url: "xxxx.oast.pro", generateErr: context.DeadlineExceeded}
-	result, err := worker.oobGenerate(fs).Call(t.Context(), json.RawMessage(`{}`), nil)
+	result, err := oobToolsForRun(worker, fs)[0].Call(t.Context(), json.RawMessage(`{}`), nil)
 	if err != nil || result.IsError {
 		t.Fatalf("OOB 初始化失败应作为明确结果返回: %v %s", err, result.Flatten())
 	}
@@ -111,9 +152,9 @@ func TestOOBGenerateServiceUnavailable(t *testing.T) {
 
 func TestOOBPollReturnsInteractions(t *testing.T) {
 	fs := &fakeSession{url: "xxxx.oast.pro", interactions: []OOBInteraction{
-		{Protocol: "dns", UniqueID: "u1", Raw: "A? u1.xxxx.oast.pro", Remote: "1.2.3.4"},
+		{Protocol: "dns", UniqueID: "probe-1", Raw: "A? probe-1.xxxx.oast.pro", Remote: "1.2.3.4"},
 	}}
-	tool := (&ToolSet{}).oobPoll(fs)
+	tool := registeredOOBPoll(t, &ToolSet{}, fs, 1)
 	res, err := tool.Call(context.Background(), json.RawMessage(`{}`), nil)
 	if err != nil {
 		t.Fatalf("oob_poll 失败: %v", err)
@@ -124,36 +165,36 @@ func TestOOBPollReturnsInteractions(t *testing.T) {
 		t.Fatalf("应返回 1 条交互，got %v", out)
 	}
 	it := got[0].(map[string]any)
-	if it["protocol"] != "dns" || it["probe_id"] != "u1" {
+	if it["protocol"] != "dns" || it["probe_id"] != "probe-1" {
 		t.Fatalf("交互字段不完整: %v", it)
 	}
 }
 
 func TestOOBPollFiltersWithoutLosingOtherProbes(t *testing.T) {
-	fs := &fakeSession{interactions: []OOBInteraction{{UniqueID: "a", Protocol: "dns"}, {UniqueID: "b", Protocol: "http"}}}
-	tool := (&ToolSet{}).oobPoll(fs)
-	res, err := tool.Call(t.Context(), json.RawMessage(`{"probe_id":"a"}`), nil)
+	fs := &fakeSession{interactions: []OOBInteraction{{UniqueID: "probe-1", Protocol: "dns"}, {UniqueID: "probe-2", Protocol: "http"}}}
+	tool := registeredOOBPoll(t, &ToolSet{}, fs, 2)
+	res, err := tool.Call(t.Context(), json.RawMessage(`{"probe_id":"probe-1"}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rows := decode(t, res.Flatten())["interactions"].([]any)
-	if len(rows) != 1 || rows[0].(map[string]any)["probe_id"] != "a" {
+	if len(rows) != 1 || rows[0].(map[string]any)["probe_id"] != "probe-1" {
 		t.Fatal(res.Flatten())
 	}
 	fs.interactions = nil
-	res, err = tool.Call(t.Context(), json.RawMessage(`{"probe_id":"b"}`), nil)
+	res, err = tool.Call(t.Context(), json.RawMessage(`{"probe_id":"probe-2"}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rows = decode(t, res.Flatten())["interactions"].([]any)
-	if len(rows) != 1 || rows[0].(map[string]any)["probe_id"] != "b" {
+	if len(rows) != 1 || rows[0].(map[string]any)["probe_id"] != "probe-2" {
 		t.Fatal(res.Flatten())
 	}
 }
 
 func TestOOBPollNoInteractions(t *testing.T) {
 	fs := &fakeSession{url: "xxxx.oast.pro"}
-	tool := (&ToolSet{}).oobPoll(fs)
+	tool := registeredOOBPoll(t, &ToolSet{}, fs, 1)
 	res, err := tool.Call(context.Background(), json.RawMessage(`{}`), nil)
 	if err != nil {
 		t.Fatalf("oob_poll 失败: %v", err)
@@ -167,7 +208,7 @@ func TestOOBPollNoInteractions(t *testing.T) {
 
 func TestOOBPollIncompleteObservationIsNotNoInteraction(t *testing.T) {
 	fs := &fakeSession{url: "xxxx.oast.pro", err: errNoCompletedPoll}
-	res, err := (&ToolSet{}).oobPoll(fs).Call(t.Context(), json.RawMessage(`{}`), nil)
+	res, err := registeredOOBPoll(t, &ToolSet{}, fs, 1).Call(t.Context(), json.RawMessage(`{}`), nil)
 	if err != nil || res.IsError {
 		t.Fatalf("未完成观察应作为明确结果返回: %v %s", err, res.Flatten())
 	}
@@ -195,7 +236,7 @@ func TestOOBPollDistinguishesNoInteractionFromServiceUnavailable(t *testing.T) {
 	worker.SetOwnerNode(intentID)
 
 	noInteraction := &fakeSession{url: "nonce.example.test"}
-	result, err := worker.oobPoll(noInteraction).Call(t.Context(), json.RawMessage(`{"wait":1}`), nil)
+	result, err := registeredOOBPoll(t, worker, noInteraction, 1).Call(t.Context(), json.RawMessage(`{"wait":1}`), nil)
 	if err != nil || result.IsError {
 		t.Fatalf("无交互轮询失败: %v %s", err, result.Flatten())
 	}
@@ -213,7 +254,7 @@ func TestOOBPollDistinguishesNoInteractionFromServiceUnavailable(t *testing.T) {
 	}
 
 	unavailable := &fakeSession{url: "nonce.example.test", err: context.DeadlineExceeded}
-	result, err = worker.oobPoll(unavailable).Call(t.Context(), json.RawMessage(`{"wait":1}`), nil)
+	result, err = registeredOOBPoll(t, worker, unavailable, 1).Call(t.Context(), json.RawMessage(`{"wait":1}`), nil)
 	if err != nil || result.IsError {
 		t.Fatalf("服务不可用轮询失败: %v %s", err, result.Flatten())
 	}

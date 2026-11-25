@@ -2,8 +2,11 @@ package oob
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -102,24 +105,37 @@ func TestHealthTransportDistinguishesPollFailures(t *testing.T) {
 
 	healthy := &healthTransport{
 		base: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":[]}`))}, nil
 		}),
 		state: &healthState{},
 	}
-	if _, err := healthy.RoundTrip(req); err != nil {
+	resp, err := healthy.RoundTrip(req)
+	if err != nil {
 		t.Fatal(err)
 	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
 	if n, err, _, ok := healthy.state.snapshot(); n != 0 || err != nil || ok.IsZero() {
 		t.Fatalf("成功轮询应记录观察窗口: n=%d err=%v ok=%v", n, err, ok)
 	}
 }
 
 func TestClientLifecycle(t *testing.T) {
-	// client.New 会立即向服务端注册；不可达的自建地址必须明确失败，
+	// client.New 会立即向服务端注册；故障的自建地址必须明确失败，
 	// 不静默回退公共服务（票据 01：配置错误明确失败）。
-	cfg := Config{Enabled: true, ServerURL: "https://127.0.0.1:1"}
-	if _, err := NewClient(cfg); err == nil {
-		t.Fatal("连接不可达服务应明确失败")
+	fixture := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/register" {
+			t.Errorf("unexpected registration endpoint: %s", r.URL.Path)
+		}
+		http.Error(w, "fixture unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(fixture.Close)
+	roots := x509.NewCertPool()
+	roots.AddCert(fixture.Certificate())
+	cfg := Config{Enabled: true, ServerURL: fixture.URL}
+	if session, err := newClientWithRoots(cfg, roots); err == nil {
+		_ = session.Close()
+		t.Fatal("故障服务应明确失败")
 	}
 	// nil 接收者的生命周期方法必须安全空操作。
 	var s *Session
@@ -128,5 +144,28 @@ func TestClientLifecycle(t *testing.T) {
 	}
 	if err := s.StopPolling(); err != nil {
 		t.Fatalf("nil Session StopPolling 应安全: %v", err)
+	}
+}
+
+func TestHealthTransportRejectsIncompleteProtocolResponse(t *testing.T) {
+	for _, body := range []string{"", "not json", `null`, `{}`, `{"error":"unknown session"}`, `{"extra":["broken interaction"]}`, `{"data":["bad encrypted event"],"aes_key":"bad"}`} {
+		t.Run(body, func(t *testing.T) {
+			state := &healthState{}
+			transport := &healthTransport{
+				base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+				}), state: state,
+			}
+			req, _ := http.NewRequest(http.MethodGet, "https://local.invalid/poll", nil)
+			resp, err := transport.RoundTrip(req)
+			if err == nil && resp != nil {
+				_, _ = io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+			}
+			_, failure, _, lastOK := state.snapshot()
+			if failure == nil || !lastOK.IsZero() {
+				t.Fatalf("HTTP 200 is not a completed protocol observation: failure=%v lastOK=%v", failure, lastOK)
+			}
+		})
 	}
 }

@@ -105,12 +105,12 @@ func TestOOBPollPersistsCorrelatedEvidenceAndContinuationBasis(t *testing.T) {
 	session := &fakeSession{url: "nonce.example.test"}
 	session.interactions = []OOBInteraction{{
 		Protocol: "dns",
-		UniqueID: "probe-7",
-		FullID:   "probe-7.nonce.example.test",
+		UniqueID: "probe-1",
+		FullID:   "probe-1.nonce.example.test",
 		Remote:   "192.0.2.10",
-		Raw:      "A? probe-7.nonce.example.test",
+		Raw:      "A? probe-1.nonce.example.test",
 	}}
-	poll := worker.oobPoll(session)
+	poll := registeredOOBPoll(t, worker, session, 1)
 	result, err := poll.Call(context.Background(), json.RawMessage(`{"wait":1}`), nil)
 	if err != nil || result.IsError {
 		t.Fatalf("oob_poll 失败: %v %s", err, result.Flatten())
