@@ -273,6 +273,45 @@ func TestTrafficGetSchemaUpgradePreservesBindingAndCustomization(t *testing.T) {
 	}
 }
 
+// Binary blob paging changed shape: the worker must be told that binary pages come
+// back as base64 JSON, while a user-edited traffic_blob description survives.
+func TestTrafficBlobDescriptionUpgrade(t *testing.T) {
+	s, _, _ := trafficEvidenceServer(t)
+	pg := s.m.pg
+	old, err := pg.GetTool("traffic_blob")
+	if err != nil || old == nil {
+		t.Fatal("missing traffic_blob", err)
+	}
+	t.Cleanup(func() {
+		bindings, _ := json.Marshal(old.Agents)
+		_ = pg.UpdateTool(old.Key, old.Description, old.Schema, bindings, old.Enabled)
+		_ = pg.SetSetting("traffic_blob_base64_v1", "false")
+	})
+
+	if err := pg.UpdateTool("traffic_blob", trafficBlobLegacyDescription, old.Schema, json.RawMessage(`["worker"]`), false); err != nil {
+		t.Fatal(err)
+	}
+	_ = pg.SetSetting("traffic_blob_base64_v1", "false")
+	s.refreshTrafficBlobDescription()
+	upgraded, _ := pg.GetTool("traffic_blob")
+	if upgraded.Description == trafficBlobLegacyDescription || !strings.Contains(upgraded.Description, "base64") {
+		t.Fatalf("内置描述未升级: %q", upgraded.Description)
+	}
+	if upgraded.Enabled || len(upgraded.Agents) != 1 || upgraded.Agents[0] != "worker" {
+		t.Fatalf("升级改动了用户绑定/启用状态: %+v", upgraded)
+	}
+
+	if err := pg.UpdateTool("traffic_blob", "我的 binary 读取说明", old.Schema, json.RawMessage(`["worker"]`), true); err != nil {
+		t.Fatal(err)
+	}
+	_ = pg.SetSetting("traffic_blob_base64_v1", "false")
+	s.refreshTrafficBlobDescription()
+	custom, _ := pg.GetTool("traffic_blob")
+	if custom.Description != "我的 binary 读取说明" || !custom.Enabled {
+		t.Fatalf("自定义描述被覆盖: %+v", custom)
+	}
+}
+
 func TestFindingTrafficToolUpgradePreservesCustomization(t *testing.T) {
 	s, _, _ := trafficEvidenceServer(t)
 	pg := s.m.pg

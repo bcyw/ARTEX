@@ -39,6 +39,10 @@ type ArchiveExchange struct {
 	RespHead    string `json:"resp_head"`
 	RespBody    []byte `json:"resp_body,omitempty"`
 	RespBlob    string `json:"resp_blob,omitempty"`
+	// RespOmitted is a tri-state carried across archive round trips: nil means an
+	// older archive that never recorded the flag, 1 an omitted body, 0 an
+	// observed body (including a real empty response).
+	RespOmitted *int `json:"resp_omitted,omitempty"`
 }
 
 // ExportHosts writes an exact-host snapshot to dir. It holds the traffic writer
@@ -76,8 +80,9 @@ FROM exchanges WHERE host IN (`+strings.Join(placeholders, ",")+`) ORDER BY ts,i
 			return 0, err
 		}
 		var reqBlob, respBlob sql.NullString
-		err := t.db.QueryRow(`SELECT req_head,req_body,req_blob,resp_head,resp_body,resp_blob
-FROM exchange_bodies WHERE id=?`, item.ID).Scan(&item.ReqHead, &item.ReqBody, &reqBlob, &item.RespHead, &item.RespBody, &respBlob)
+		var respOmitted sql.NullInt64
+		err := t.db.QueryRow(`SELECT req_head,req_body,req_blob,resp_head,resp_body,resp_blob,resp_omitted
+FROM exchange_bodies WHERE id=?`, item.ID).Scan(&item.ReqHead, &item.ReqBody, &reqBlob, &item.RespHead, &item.RespBody, &respBlob, &respOmitted)
 		if errors.Is(err, sql.ErrNoRows) && strings.TrimSpace(legacyPath) != "" {
 			req, readErr := os.ReadFile(filepath.Join(t.dir, legacyPath, "request.http"))
 			if readErr != nil && !os.IsNotExist(readErr) {
@@ -92,6 +97,10 @@ FROM exchange_bodies WHERE id=?`, item.ID).Scan(&item.ReqHead, &item.ReqBody, &r
 			return 0, err
 		}
 		item.ReqBlob, item.RespBlob = reqBlob.String, respBlob.String
+		if respOmitted.Valid {
+			value := int(respOmitted.Int64)
+			item.RespOmitted = &value
+		}
 		for _, hash := range []string{item.ReqBlob, item.RespBlob} {
 			if hash != "" {
 				blobs[hash] = struct{}{}
@@ -188,9 +197,19 @@ VALUES(?,?,?,?,?,?,?,?,?,?,'')`, item.ID, item.TS, item.Host, item.Method, item.
 		if n == 0 {
 			continue
 		}
-		if _, err := tx.Exec(`INSERT INTO exchange_bodies(id,req_head,req_body,req_blob,resp_head,resp_body,resp_blob)
-VALUES(?,?,?,?,?,?,?)`, item.ID, item.ReqHead, item.ReqBody, nullIfEmpty(item.ReqBlob),
-			item.RespHead, item.RespBody, nullIfEmpty(item.RespBlob)); err != nil {
+		var omitted any
+		switch {
+		case item.RespOmitted == nil:
+			// Older archives never recorded the flag; keep NULL so a historical
+			// browser import cannot claim an observed empty response.
+		case *item.RespOmitted != 0:
+			omitted = 1
+		default:
+			omitted = 0
+		}
+		if _, err := tx.Exec(`INSERT INTO exchange_bodies(id,req_head,req_body,req_blob,resp_head,resp_body,resp_blob,resp_omitted)
+VALUES(?,?,?,?,?,?,?,?)`, item.ID, item.ReqHead, item.ReqBody, nullIfEmpty(item.ReqBlob),
+			item.RespHead, item.RespBody, nullIfEmpty(item.RespBlob), omitted); err != nil {
 			return imported, err
 		}
 		for _, hash := range []string{item.ReqBlob, item.RespBlob} {

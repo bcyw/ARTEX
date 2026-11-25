@@ -1811,17 +1811,26 @@ func (t *ToolSet) validateExperimentProbe(raw any) error {
 	if err := t.validateExperimentReferences(map[string]any{"references": []any{basis}}); err != nil {
 		return fmt.Errorf("send_basis: %w", err)
 	}
-	basis["verified"] = true
+	// Only a basis the host actually resolved may prove a send. Without a
+	// verifier (or for material refs, which have none yet) it stays unverified
+	// and must not be upgraded by the model's own claim.
+	if verified, _ := basis["verified"].(bool); !verified {
+		return fmt.Errorf("experiment.probe.send_basis 无法验证：请引用已存在的活动步骤或已捕获流量")
+	}
 	return nil
 }
 
 func (t *ToolSet) validateExperimentReferences(experiment map[string]any) error {
-	refs, ok := experiment["references"].([]any)
-	if !ok {
+	raw, present := experiment["references"]
+	if !present || raw == nil {
 		return nil
 	}
-	for _, raw := range refs {
-		ref, ok := raw.(map[string]any)
+	refs, ok := raw.([]any)
+	if !ok {
+		return fmt.Errorf("experiment.references 必须是对象数组")
+	}
+	for _, item := range refs {
+		ref, ok := item.(map[string]any)
 		if !ok {
 			return fmt.Errorf("experiment.references 必须是对象数组")
 		}

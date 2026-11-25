@@ -114,6 +114,13 @@ func TestRecordFactRequiresBasisBeforeClaimingProbeSent(t *testing.T) {
 	if probe["send_state"] != "sent" || probe["send_basis"].(map[string]any)["verified"] != true {
 		t.Fatalf("probe send basis was not recorded as verified: %+v", probe)
 	}
+
+	// A traffic id the host cannot resolve is not a send basis: without a verifier
+	// the model must not be able to upgrade its own claim to "sent".
+	unverified := `{"summary":"probe sent on an unverified traffic claim","experiment":{"probe":{"allocated":true,"send_state":"sent","send_basis":{"kind":"traffic","id":"browser-absent"}}}}`
+	if result := callRecordFact(t, worker.WorkerTools(), unverified); !result.IsError || !strings.Contains(result.Flatten(), "verify") && !strings.Contains(result.Flatten(), "验证") {
+		t.Fatalf("an unverifiable traffic send basis should be rejected: %s", result.Flatten())
+	}
 }
 
 func TestRecordFactKeepsAllocatedOnlyAndBlockedProbesDistinct(t *testing.T) {

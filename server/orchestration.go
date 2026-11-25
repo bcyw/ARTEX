@@ -510,6 +510,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.refreshBuiltinToolSchemas()
 	s.seedRouteGuidanceToolSchema()
 	s.refreshTrafficGetSchema()
+	s.refreshTrafficBlobDescription()
 	s.refreshRecordFactExperimentSchema()
 	s.seedAutoDefaultBindings()
 	s.seedPlannerDefaultBindings()
@@ -582,6 +583,32 @@ WHERE key='traffic_get' AND system AND json_type(schema,$1) IS NULL`, path, stri
 // trafficGetLegacyDescription is the description older releases seeded; only an
 // unmodified one is replaced, so operator edits survive the upgrade.
 const trafficGetLegacyDescription = "按 id 取一条已抓流量的请求/响应原文（过大会截断）。配合 traffic_search 用，避免重复 curl。"
+
+// trafficBlobLegacyDescription is the seeded traffic_blob description from before
+// binary pages could be read losslessly. Only the untouched default is replaced.
+const trafficBlobLegacyDescription = "分段读取超大请求/响应体的原文。traffic_get 里显示为 '…[truncated] @blob sha256:<hash>' 的部分即存放于此，把该 hash 传进来即可取完整内容。单次最多返回 8KB，用 offset 继续往后读（返回结果会给出总长度）。适合翻阅备份文件、源码泄露、大 JSON 导出等超过内联阈值的响应。"
+
+// refreshTrafficBlobDescription upgrades a database whose traffic_blob row still
+// carries the pre-base64 default text, so the worker learns that binary pages
+// come back as base64 JSON. A user-edited description is left alone.
+func (s *Server) refreshTrafficBlobDescription() {
+	const flag = "traffic_blob_base64_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	for _, t := range traffic.SeedToolMetas() {
+		if t.Name() != "traffic_blob" {
+			continue
+		}
+		if _, err := s.m.pg.Exec(`UPDATE tools SET description=$1,updated_at=now()
+WHERE key='traffic_blob' AND system AND description=$2`, t.Description(), trafficBlobLegacyDescription); err != nil {
+			log.Printf("[traffic] refresh traffic_blob description: %v", err)
+			return
+		}
+		_ = s.m.pg.SetSetting(flag, "true")
+		return
+	}
+}
 
 // refreshRecordFactExperimentSchema adds the optional experiment/experiments
 // handoff properties to an already-seeded record_fact row. SeedTool is

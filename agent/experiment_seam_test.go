@@ -14,6 +14,12 @@ import (
 // A worker saves a planned delayed trigger; a later worker recovers the same
 // question and records the completed observation. This is the planner/worker
 // handoff the ticket asks for, run through the real Execute/Plan entry points.
+//
+// Scope: the provider is scripted, so this proves the deterministic orchestration
+// and that each worker's own assembled input carries the saved experiment (and
+// nothing earlier). It does not measure whether a real model would notice,
+// follow or correctly conclude from that context — that needs an isolated model
+// evaluation with a fixed provider, config and budget.
 func TestExperimentHandoffSurvivesNextWorker(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "business.sqlite")
 	d, err := db.Open(dbPath)

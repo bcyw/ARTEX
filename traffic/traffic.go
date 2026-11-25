@@ -59,13 +59,14 @@ CREATE INDEX IF NOT EXISTS idx_ex_status ON exchanges(status);
 CREATE INDEX IF NOT EXISTS idx_ex_resp   ON exchanges(resp_len);
 
 CREATE TABLE IF NOT EXISTS exchange_bodies (
-  id        TEXT PRIMARY KEY,
-  req_head  TEXT NOT NULL DEFAULT '',
-  req_body  BLOB,
-  req_blob  TEXT,
-  resp_head TEXT NOT NULL DEFAULT '',
-  resp_body BLOB,
-  resp_blob TEXT
+  id          TEXT PRIMARY KEY,
+  req_head    TEXT NOT NULL DEFAULT '',
+  req_body    BLOB,
+  req_blob    TEXT,
+  resp_head   TEXT NOT NULL DEFAULT '',
+  resp_body   BLOB,
+  resp_blob   TEXT,
+  resp_omitted INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS blob_refs (
@@ -284,12 +285,49 @@ func (t *Traffic) initIndex() error {
 	if _, err := conn.ExecContext(ctx, indexSchema); err != nil {
 		return err
 	}
+	if err := ensureBodyOmittedColumn(ctx, conn); err != nil {
+		return err
+	}
 	if _, err := conn.ExecContext(ctx, ftsSchema); err != nil {
 		log.Printf("[traffic] 全文索引不可用，正文搜索将被禁用（元数据搜索不受影响）：%v", err)
 		return nil
 	}
 	t.fts = true
 	return nil
+}
+
+// ensureBodyOmittedColumn adds resp_omitted to indexes created before browser
+// imports recorded whether the response body existed. CREATE TABLE IF NOT EXISTS
+// never alters an existing table, so the upgrade has to be explicit. Historical
+// rows keep NULL, which readers must treat as "unknown", not as "present".
+func ensureBodyOmittedColumn(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, `PRAGMA table_info(exchange_bodies)`)
+	if err != nil {
+		return err
+	}
+	exists := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var def any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &def, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "resp_omitted" {
+			exists = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if exists {
+		return nil
+	}
+	_, err = conn.ExecContext(ctx, `ALTER TABLE exchange_bodies ADD COLUMN resp_omitted INTEGER`)
+	return err
 }
 
 // hostOnly strips an optional :port, so passthrough keys match whether the host
@@ -1025,22 +1063,32 @@ func (t *Traffic) GetParts(id string) (req, resp BodyPart, err error) {
 	var reqBody, respBody []byte
 	var reqBlob, respBlob sql.NullString
 	var reqMissing, respMissing bool
+	var respOmitted sql.NullInt64
 	var reqLen, respLen int
 	// An empty blob and SQL NULL both scan into an empty []byte, but they mean
 	// different things: the target returned nothing vs. the body was not saved.
 	// Ask SQLite directly so a real zero-length response stays "present".
-	err = t.db.QueryRow(`SELECT b.req_head,b.req_body,b.req_body IS NULL,b.req_blob,b.resp_head,b.resp_body,b.resp_body IS NULL,b.resp_blob,e.req_len,e.resp_len
+	err = t.db.QueryRow(`SELECT b.req_head,b.req_body,b.req_body IS NULL,b.req_blob,b.resp_head,b.resp_body,b.resp_body IS NULL,b.resp_blob,b.resp_omitted,e.req_len,e.resp_len
 FROM exchange_bodies b JOIN exchanges e ON e.id=b.id WHERE b.id=?`, id).
-		Scan(&reqHead, &reqBody, &reqMissing, &reqBlob, &respHead, &respBody, &respMissing, &respBlob, &reqLen, &respLen)
+		Scan(&reqHead, &reqBody, &reqMissing, &reqBlob, &respHead, &respBody, &respMissing, &respBlob, &respOmitted, &reqLen, &respLen)
 	if err == nil {
 		req = t.newBodyPart(reqHead, reqMissing, reqBody, reqBlob, int64(reqLen))
 		resp = t.newBodyPart(respHead, respMissing, respBody, respBlob, int64(respLen))
 		if strings.HasPrefix(id, "browser-") {
 			const browserWarning = "浏览器导入：未由 ARTEX 复测，身份头或响应正文可能省略；不能以缺失正文判断目标响应。"
 			req.Warning, resp.Warning = browserWarning, browserWarning
-			// Historical browser imports did not persist the omitted flag, so an
-			// empty stored body cannot prove an empty response was observed.
-			if resp.Availability == BodyPresent && resp.Total == 0 {
+			switch {
+			case respOmitted.Valid && respOmitted.Int64 != 0:
+				// The importer recorded that no response body was supplied. The NULL
+				// body already reads as missing; name the reason so it is never taken
+				// for an observed empty response.
+				resp.Warning = browserWarning + " 本次导入未提供响应正文。"
+			case respOmitted.Valid:
+				// The importer recorded an observed body; a zero length here is a
+				// real empty response, not an unknown one.
+			case resp.Availability == BodyPresent && resp.Total == 0:
+				// Historical rows did not persist the omitted flag, so an empty
+				// stored body cannot prove an empty response was observed.
 				resp.Availability = BodyUnknown
 			}
 		}
@@ -2307,7 +2355,7 @@ func (t *Traffic) Tools() []actool.CoreTool {
 
 	blob := actool.Build(actool.Spec{
 		Name:        "traffic_blob",
-		Description: "分段读取超大请求/响应体的原文。traffic_get 里显示为 '…[truncated] @blob sha256:<hash>' 的部分即存放于此，把该 hash 传进来即可取完整内容。单次最多返回 8KB，用 offset 继续往后读（返回结果会给出总长度）。适合翻阅备份文件、源码泄露、大 JSON 导出等超过内联阈值的响应。",
+		Description: "分段读取超大请求/响应体的原文。traffic_get 里显示为 '…[truncated] @blob sha256:<hash>' 的部分即存放于此，把该 hash 传进来即可取完整内容。单次最多返回 8KB，用 offset 继续往后读（返回结果会给出总长度）。文本按原文返回；二进制或跨 UTF-8 边界的页返回 base64 JSON（data/offset/next_offset/total/remaining），按 next_offset 继续即可无损还原字节。适合翻阅备份文件、源码泄露、大 JSON 导出等超过内联阈值的响应。",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -2337,10 +2385,23 @@ func (t *Traffic) Tools() []actool.CoreTool {
 				return actool.Text(fmt.Sprintf("偏移 %d 已超出内容长度（总长 %d 字节）。", a.Offset, total)), nil
 			}
 			head := fmt.Sprintf("[offset=%d 本次=%d 总长=%d]\n", a.Offset, len(data), total)
-			if isBinaryBody("", data) {
-				return actool.Text(head + "二进制内容，以十六进制展示前 512 字节：\n" + hex.EncodeToString(clipBytes(data, 512))), nil
+			// Binary content cannot be shown as text without corrupting it, so it is
+			// returned as base64 with explicit offsets: the page length always equals
+			// the bytes actually returned, and the worker can reassemble the blob.
+			if isBinaryBody("", data) || !utf8.Valid(data) {
+				return jsonResult(map[string]any{
+					"encoding":    "base64",
+					"data":        base64.StdEncoding.EncodeToString(data),
+					"offset":      a.Offset,
+					"next_offset": a.Offset + int64(len(data)),
+					"total":       total,
+					"remaining":   total - a.Offset - int64(len(data)),
+					"truncated":   a.Offset+int64(len(data)) < total,
+					"binary":      true,
+					"note":        head + "二进制内容，data 为 base64；按 next_offset 继续取回完整字节",
+				})
 			}
-			return actool.Text(head + truncateUTF8(data, len(data))), nil
+			return actool.Text(head + string(data)), nil
 		},
 	})
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -160,5 +161,61 @@ VALUES('x',1,'new.example.com','GET','/x','http://x/x',200,'',0,0,'')`); err != 
 	}
 	if _, err := old.Exec(`DELETE FROM exchanges WHERE host='keep.example.com'`); err != nil {
 		t.Fatalf("旧版本删除失败: %v", err)
+	}
+}
+
+// A browser-import omission flag added after release must be migrated explicitly:
+// CREATE TABLE IF NOT EXISTS leaves an existing table alone, so without the
+// upgrade an old index would return a scan error for every traffic read.
+func TestUpgradeAddsBodyOmittedColumn(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "_index"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old, err := sql.Open("sqlite", filepath.Join(dir, "_index", "index.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The pre-flag shape of the body table, plus one row a reader must still see.
+	for _, stmt := range []string{
+		`CREATE TABLE exchanges (id TEXT PRIMARY KEY, ts INTEGER, host TEXT, method TEXT, url_template TEXT, url TEXT,
+status INTEGER, content_type TEXT, req_len INTEGER, resp_len INTEGER, path TEXT)`,
+		`CREATE TABLE exchange_bodies (id TEXT PRIMARY KEY, req_head TEXT NOT NULL DEFAULT '', req_body BLOB, req_blob TEXT,
+resp_head TEXT NOT NULL DEFAULT '', resp_body BLOB, resp_blob TEXT)`,
+		`CREATE TABLE blob_refs (hash TEXT NOT NULL, exchange_id TEXT NOT NULL, PRIMARY KEY (hash, exchange_id))`,
+		`INSERT INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path)
+VALUES('old-order-1',1,'old.example.com','GET','/o','http://old/o',200,'text/plain',0,2,'')`,
+		`INSERT INTO exchange_bodies(id,req_head,req_body,resp_head,resp_body)
+VALUES('old-order-1','GET /o HTTP/1.1','','HTTP/1.1 200 OK','ok')`,
+	} {
+		if _, err := old.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	tr, err := Open(dir, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("旧库升级失败: %v", err)
+	}
+	defer tr.Close()
+	var columns int
+	if err := tr.DB().QueryRow(`SELECT COUNT(*) FROM pragma_table_info('exchange_bodies') WHERE name='resp_omitted'`).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	if columns != 1 {
+		t.Fatal("升级后缺少 resp_omitted 列")
+	}
+	if _, resp, err := tr.Get("old-order-1"); err != nil || !strings.Contains(resp, "ok") {
+		t.Fatalf("升级后历史正文不可读: resp=%q err=%v", resp, err)
+	}
+	req, respPart, err := tr.GetParts("old-order-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Availability != BodyPresent || respPart.Availability != BodyPresent {
+		t.Fatalf("非浏览器历史流量应保持 present: %+v %+v", req, respPart)
 	}
 }

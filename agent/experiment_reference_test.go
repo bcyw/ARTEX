@@ -29,4 +29,19 @@ func TestRecordFactValidatesGraphExperimentReferences(t *testing.T) {
 	if result := callRecordFact(t, worker.WorkerTools(), unsupported); !result.IsError || !strings.Contains(result.Flatten(), "kind") {
 		t.Fatalf("unsupported reference kind should be rejected: %s", result.Flatten())
 	}
+	// A non-array references value must not slip past validation: it would keep a
+	// model-asserted verified flag on an object that was never checked.
+	for name, input := range map[string]string{
+		"object": `{"summary":"references object","experiment":{"references":{"kind":"node","id":1,"verified":true}}}`,
+		"string": `{"summary":"references string","experiment":{"references":"node:1","verified":true}}`,
+	} {
+		if result := callRecordFact(t, worker.WorkerTools(), input); !result.IsError || !strings.Contains(result.Flatten(), "references") {
+			t.Errorf("%s references should be rejected: %s", name, result.Flatten())
+		}
+	}
+	// An explicit null is equivalent to omitting the field.
+	nullRefs := `{"summary":"references null","experiment":{"references":null,"execution_state":"planned"}}`
+	if result := callRecordFact(t, worker.WorkerTools(), nullRefs); result.IsError {
+		t.Fatalf("null references should be treated as absent: %s", result.Flatten())
+	}
 }

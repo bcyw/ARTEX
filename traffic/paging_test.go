@@ -86,6 +86,53 @@ func TestTrafficGetKeepsBlobPointerAndPages(t *testing.T) {
 	}
 }
 
+// Binary blobs cannot be shown as text: every page must return base64 bytes whose
+// reported length matches what was actually returned, so paging reassembles the
+// original file instead of dropping the tail of each 8 KiB window.
+func TestTrafficBlobPagesBinaryBytesLosslessly(t *testing.T) {
+	tr, _ := openTraffic(t)
+	if !tr.fts {
+		t.Skip("驱动未启用 FTS5")
+	}
+	body := bytes.Repeat([]byte{0x00, 0xff, 0x10, 0x80, 0x7f}, maxInlineBody)
+	tr.record(newFlow("blob-bytes.example.com", "GET", "/payload.bin", nil, body, withRespType("application/octet-stream")))
+	id := onlyExchangeID(t, tr)
+	var hash string
+	if err := tr.DB().QueryRow(`SELECT resp_blob FROM exchange_bodies WHERE id=?`, id).Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	var joined []byte
+	for offset := 0; offset < len(body); {
+		out := toolText(t, tr, "traffic_blob", map[string]any{"hash": hash, "offset": offset})
+		var page struct {
+			Encoding  string `json:"encoding"`
+			Data      string `json:"data"`
+			Offset    int64  `json:"offset"`
+			Next      int64  `json:"next_offset"`
+			Total     int64  `json:"total"`
+			Remaining int64  `json:"remaining"`
+			Truncated bool   `json:"truncated"`
+		}
+		if err := json.Unmarshal([]byte(out), &page); err != nil {
+			t.Fatalf("二进制 blob 页必须是 base64 JSON: %v\n%s", err, clip(out, 300))
+		}
+		data, err := base64.StdEncoding.DecodeString(page.Data)
+		if err != nil || len(data) == 0 {
+			t.Fatalf("二进制 blob 页 data 无效: %+v (%v)", page, err)
+		}
+		wantLen := min(maxBlobRead, len(body)-offset)
+		if page.Encoding != "base64" || page.Offset != int64(offset) || page.Next != int64(offset+len(data)) ||
+			len(data) != wantLen || page.Total != int64(len(body)) || page.Remaining != page.Total-page.Next {
+			t.Fatalf("二进制 blob 页长度/偏移与实际返回不一致: page=%+v got=%d want=%d", page, len(data), wantLen)
+		}
+		joined = append(joined, data...)
+		offset = int(page.Next)
+	}
+	if !bytes.Equal(joined, body) {
+		t.Fatal("分页未还原二进制 blob 原始字节")
+	}
+}
+
 // Pointer-like text inside a captured body must never become a continuation
 // hint: only real storage metadata may do that.
 func TestTrafficGetDoesNotPromoteInlineBlobPointer(t *testing.T) {
@@ -193,9 +240,13 @@ func TestTrafficGetBrowserBodyAvailability(t *testing.T) {
 		t.Fatal("省略正文不应读取为空")
 	}
 
-	// Historical row: response_body stored as an empty blob by the old importer.
+	// Historical row: the flag did not exist yet and the old importer stored an
+	// empty blob, so an empty body cannot prove the target returned nothing.
 	id2, err := tr.ImportBrowser(BrowserExchange{URL: "https://browser.example.com/hist", Method: "GET", Status: 200})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.DB().Exec(`UPDATE exchange_bodies SET resp_omitted=NULL WHERE id=?`, id2); err != nil {
 		t.Fatal(err)
 	}
 	meta = toolText(t, tr, "traffic_get", map[string]any{"id": id2, "side": "response", "meta_only": true})
@@ -204,6 +255,29 @@ func TestTrafficGetBrowserBodyAvailability(t *testing.T) {
 	}
 	if info.Availability != "unknown" || !strings.Contains(info.Warning, "浏览器导入") {
 		t.Fatalf("历史空正文应标为 unknown 并保留警告: %s", meta)
+	}
+
+	// A real empty response recorded by the importer stays present: an observed
+	// zero-length body must not be folded into the unknown historical state.
+	id3, err := tr.ImportBrowser(BrowserExchange{URL: "https://browser.example.com/empty", Method: "GET", Status: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta = toolText(t, tr, "traffic_get", map[string]any{"id": id3, "side": "response", "meta_only": true})
+	if err := json.Unmarshal([]byte(meta), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Availability != "present" {
+		t.Fatalf("真实空响应应保持 present: %s", meta)
+	}
+	page := toolText(t, tr, "traffic_get", map[string]any{"id": id3, "side": "response", "encoding": "base64"})
+	var empty struct {
+		Data     string `json:"data"`
+		Total    int    `json:"total"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.Unmarshal([]byte(page), &empty); err != nil || empty.Data != "" || empty.Total != 0 || empty.Encoding != "base64" {
+		t.Fatalf("真实空响应应可读取为零字节页: %s (%v)", page, err)
 	}
 }
 
