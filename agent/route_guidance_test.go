@@ -42,6 +42,7 @@ func TestHighValueKnowledgeAndStandardSync(t *testing.T) {
 			}
 		}
 	}
+	syncStandardsPolicy(t, string(raw), srcAcceptanceDefault)
 	root := "../skills/clown-src"
 	for _, file := range []string{"SKILL.md", "知识库/README.md", "知识库/deserialization-test.md", "知识库/ssrf-test.md", "知识库/injection-test.md", "知识库/el-injection-test.md", "知识库/file-upload-test.md", "知识库/path-traversal-lfi-test.md"} {
 		body, err := os.ReadFile(filepath.Join(root, file))
@@ -62,6 +63,52 @@ func TestHighValueKnowledgeAndStandardSync(t *testing.T) {
 	for _, want := range []string{"通用 0day", "搜索关闭", "oob_generate", "oob_poll", "no_interaction", "service_unavailable", "不自动下载或执行", "非破坏性", "negative"} {
 		if !strings.Contains(string(guide), want) {
 			t.Errorf("shared guide missing %s", want)
+		}
+	}
+}
+
+// syncStandardsPolicy pins every machine-enforced policy paragraph of the disk
+// standard (standards/src-acceptance.md) to the embedded fallback
+// (srcAcceptanceDefault). The fallback prose is deliberately condensed, so the
+// check normalizes emphasis/whitespace and probes each policy by a
+// representative fragment pair: the disk fragment must exist on disk, and the
+// fallback must carry the same policy in its own wording. Add a pair whenever a
+// new policy paragraph lands in the standard; keeping this table in the same
+// test file as the catalog check makes forgetting it hard.
+func syncStandardsPolicy(t *testing.T, disk, fallback string) {
+	t.Helper()
+	normalize := func(s string) string {
+		s = strings.ReplaceAll(s, "**", "")
+		s = strings.ReplaceAll(s, " ", "")
+		return s
+	}
+	d, f := normalize(disk), normalize(fallback)
+	for _, p := range []struct{ name, diskFrag, fallbackFrag string }{
+		{"公开性判据", "完成判据：找到未登录可见的正常前端入口拿到同样数据", "完成判据：找到未登录可见的正常前端入口拿到同样数据"},
+		{"密钥例外", "公开性只豁免无危害信息，不豁免可利用凭据", "公开性只豁免无危害信息，不豁免可利用凭据"},
+		{"受控证明边界", "真实身份/权限或业务不变量突破才成立", "真实身份/权限或业务不变量突破才成立"},
+		{"机制与结果分离", "worker 不得改标签、改指其他 intent_id 或覆盖原 proof 绕过归属", "worker 不得改标签、改指其他 intent_id 或覆盖原 proof 绕过归属"},
+		{"硬门-先证伪", "主动跑否定实验", "主动跑否定实验"},
+		{"硬门-PoC可复现", "非 HTTP 或未抓包时用命令/日志等可核验证据，不要求流量绑定", "非 HTTP 或未抓包时用命令/日志等可核验证据，不要求流量绑定"},
+		{"硬门-链路终局", "终局结果，不是中间信号", "终局结果，不是中间信号"},
+		{"查重", "补强已有 finding，不新写", "补强已有 finding，不新写"},
+		{"不挖清单", "只允许花 1-2 次请求确认能否升级到链路终局", "只允许花 1-2 次请求确认能否升级到链路终局"},
+		{"访问差异", "不主动规划仅证明普通访问差异的验证意图", "不主动规划仅证明普通访问差异的验证意图"},
+		{"同类上限", "已经取得、符合收取纪律的独立根因证据仍可登记", "已经取得、符合收取纪律的独立根因证据仍可登记"},
+		{"别名折叠", "目录外新写法仍自成一桶、照常计数并允许上报", "目录外新写法仍自成一桶、照常计数并允许上报"},
+		{"定级封顶", "评分封顶【中】", "评分封顶【中】"},
+		{"复测", "连续无法复现的次数不构成误报证据", "连续无法复现的次数不构成误报证据"},
+		{"路线身份", "改变摘要、payload、机制拼写或意图 ID 不重置去重与预算", "改变摘要、payload、机制拼写或意图 ID 不重置去重与预算"},
+		{"有界续探", "默认最多创建 6 次执行意图", "默认最多创建 6 次执行意图"},
+		{"信息增量", "未执行计划、重复证据、nonce、新 ID 与改写的摘要/结果不算增量", "未执行计划、重复证据、nonce、新 ID 与改写的摘要/结果不算增量"},
+		{"无信息换向", "连续 3 个规划轮次同路线没有可核验的新观察时换方向", "连续 3 个规划轮次同路线没有可核验的新观察时换方向"},
+		{"OOB解释", "暂无交互或 OOB 服务故障不证明目标无漏洞", "暂无交互或 OOB 服务故障不证明目标无漏洞"},
+	} {
+		if !strings.Contains(d, normalize(p.diskFrag)) {
+			t.Errorf("standard %s: disk fragment not found (update the pair): %s", p.name, p.diskFrag)
+		}
+		if !strings.Contains(f, normalize(p.fallbackFrag)) {
+			t.Errorf("standard %s: fallback policy missing or reworded: %s", p.name, p.fallbackFrag)
 		}
 	}
 }

@@ -53,6 +53,11 @@ npm run build:static
 - For task-lifecycle changes, run the focused `go test -race ./server` command in `.github/workflows/ci.yml`. That workflow also defines vulnerability, dependency, and browser-extension gates.
 - Launcher edits must preserve LF without BOM for shell scripts and ASCII CRLF for `start.bat`; focused check: `python3 -m unittest discover -s scripts -p test_launchers.py -v`.
 
+## Session hygiene
+
+- Long-running features get one candidate branch/worktree; close each ticket by merging to it and removing the ticket's worktree, and after final merge run `git worktree list` plus `git branch` and clean up leftovers.
+- Specs and tickets live in `.scratch/<feature>/` (see `docs/agents/issue-tracker.md`). One authoritative tracker per feature: after a candidate delivery merges, its tracker replaces any stale copy.
+
 ## Data and standards
 
 - `db/db.go` reapplies schemas at startup with `user_version=1`, rejecting higher versions. There is no migration framework: changing `CREATE TABLE IF NOT EXISTS` does not alter existing tables. Schema changes need explicit migration code or a fresh test database.
