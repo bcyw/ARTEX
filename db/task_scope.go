@@ -371,6 +371,7 @@ type CoverageGraphNode struct {
 	Tested      bool   `json:"tested"`
 	InScope     bool   `json:"in_scope"`
 	AssetID     int64  `json:"asset_id,omitempty"` // 0 for company / synthetic root
+	ServiceID   int64  `json:"service_id,omitempty"`
 	CompanyID   int64  `json:"company_id,omitempty"`
 	Domain      string `json:"domain,omitempty"`
 	RootDomain  string `json:"root_domain,omitempty"`
@@ -430,7 +431,7 @@ SELECT a.id, a.type, COALESCE(a.company_id,0),
        COALESCE(a.domain,''), COALESCE(a.root_domain,''), COALESCE(a.ip,''),
        COALESCE(a.url,''), COALESCE(a.port,0), COALESCE(a.service_type,''),
        COALESCE(a.app_name,''), COALESCE(a.page_title,''), COALESCE(a.status_code,0),
-       (a.id IN (SELECT asset_id FROM tested)) AS tested
+        (a.id IN (SELECT asset_id FROM tested)) AS tested, COALESCE(a.service_id,0)
 FROM assets a JOIN target t ON t.id = a.id
 ORDER BY a.id`, taskID)
 	if err != nil {
@@ -461,7 +462,7 @@ ORDER BY a.id`, taskID)
 		var companyID int64
 		if err := rows.Scan(&n.AssetID, &n.Kind, &companyID,
 			&n.Domain, &n.RootDomain, &n.IP, &n.URL, &n.Port, &n.ServiceType,
-			&n.AppName, &n.PageTitle, &n.StatusCode, &n.Tested); err != nil {
+			&n.AppName, &n.PageTitle, &n.StatusCode, &n.Tested, &n.ServiceID); err != nil {
 			return nil, err
 		}
 		n.Key = assetKey(n.AssetID)
@@ -574,6 +575,7 @@ WHERE type='root_domain' AND domain=$1 LIMIT 1`, root).Scan(&id, &companyID)
 		case "endpoint":
 			host, port := hostPortOf(n)
 			parent := firstOf(
+				assetKey(n.ServiceID),
 				svcByHostPort[host+"|"+strconv.Itoa(port)], svcByHost[host],
 				subByDomain[host], subByDomain[n.Domain], ipByAddr[host], ipByAddr[n.IP],
 				rootByDomain[n.RootDomain])

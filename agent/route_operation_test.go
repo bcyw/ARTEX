@@ -256,6 +256,7 @@ func TestOperationLegacyMethodRecoveryIsConservative(t *testing.T) {
 		methods           []string
 	}{
 		{"one anchored method", "https://example.test/item", "POST", []string{"POST"}},
+		{"templated endpoint", "https://example.test/users/42?id=7", "POST", []string{"POST"}},
 		{"conflicting anchored methods", "https://example.test/item", "", []string{"POST", "GET"}},
 		{"no method evidence", "https://example.test/item", "", nil},
 		{"non HTTP context", "tcp://example.test:9000", "", []string{"POST"}},
@@ -264,7 +265,15 @@ func TestOperationLegacyMethodRecoveryIsConservative(t *testing.T) {
 			tools := intentTypeToolSet(t)
 			var anchors []int64
 			for _, method := range tc.methods {
-				id, err := tools.ts.DB().Assets().UpsertEndpoint(db.UpsertEndpointReq{URL: tc.entry, Method: method, TaskID: tools.taskID})
+				var id int64
+				var err error
+				if strings.HasPrefix(tc.entry, "tcp:") {
+					// Retained legacy data can contain non-HTTP endpoints; new writes
+					// now require an HTTP service and must reject this URL.
+					err = tools.ts.DB().QueryRow(`INSERT INTO assets(type,url,method,task_ids) VALUES('endpoint',$1,$2,json_array($3)) RETURNING id`, tc.entry, method, tools.taskID).Scan(&id)
+				} else {
+					id, err = tools.ts.DB().Assets().UpsertEndpoint(db.UpsertEndpointReq{URL: tc.entry, Method: method, TaskID: tools.taskID})
+				}
 				if err != nil {
 					t.Fatal(err)
 				}

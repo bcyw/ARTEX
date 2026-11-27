@@ -321,6 +321,8 @@ func mergeJSONArray(args []driver.Value, key string) (driver.Value, error) {
 			if key == "port" {
 				k = fmt.Sprint(m["port"])
 			} else {
+				m = cleanEndpointParam(m)
+				v = m
 				k = fmt.Sprint(m["location"]) + "\x00" + fmt.Sprint(m["name"])
 			}
 			if prev, ok := byKey[k]; ok {
@@ -330,10 +332,7 @@ func mergeJSONArray(args []driver.Value, key string) (driver.Value, error) {
 						continue
 					}
 				} else {
-					pb, _ := json.Marshal(prev)
-					if string(pb) > string(b) {
-						continue
-					}
+					v = mergeEndpointParam(prev.(map[string]any), m)
 				}
 			}
 		}

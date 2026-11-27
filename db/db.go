@@ -88,13 +88,18 @@ func (d *DB) initialize() error {
 	if err = tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
+	if version > 2 {
 		return fmt.Errorf("SQLite schema version %d is newer than this application", version)
 	}
 	if _, err = tx.Exec(schemaSQL + llmRecordsSchema + llmUsageSchema); err != nil {
 		return fmt.Errorf("apply SQLite schema: %w", err)
 	}
-	if _, err = tx.Exec("PRAGMA user_version=1"); err != nil {
+	if version < 2 {
+		if err = d.migrateEndpoints(tx); err != nil {
+			return fmt.Errorf("migrate endpoints to schema 2: %w", err)
+		}
+	}
+	if _, err = tx.Exec("PRAGMA user_version=2"); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {

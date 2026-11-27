@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -84,6 +85,7 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	}{
 		{`DELETE FROM task_relations WHERE task_id=$1 OR source_task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_asset_links WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM endpoint_candidates WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_llm_profiles WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_scope WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_constraints WHERE exploration_id=$1`, []any{expID}},
@@ -279,7 +281,7 @@ WHERE archive.id=$1 `, archiveID).Scan(&taskID, &expID, &state); err != nil {
 	} else {
 		warnings = append(warnings, warning...)
 	}
-	for _, table := range []string{"task_asset_links", "findings"} {
+	for _, table := range []string{"task_asset_links", "findings", "endpoint_candidates"} {
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
@@ -397,6 +399,7 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
 		"task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,
 		"finding_report_sections": true,
+		"endpoint_candidates":     true,
 		"llm_records":             true, "llm_usage": true, "skill_usage": true, "tool_usage": true,
 		"side_question_sessions": true, "side_question_requests": true,
 	}
@@ -416,6 +419,11 @@ func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[in
 	}
 	mapping := make(map[int64]int64, len(rows))
 	warnings := []string{}
+	// A service ID in an archive may now identify another asset. Restore global
+	// services first, then resolve each endpoint's owner by canonical origin.
+	sort.SliceStable(rows, func(i, j int) bool {
+		return rows[i]["type"] != "endpoint" && rows[j]["type"] == "endpoint"
+	})
 	for _, row := range rows {
 		oldID, ok := jsonInt64(row["id"])
 		if !ok || oldID <= 0 {
@@ -426,10 +434,20 @@ func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[in
 			row["company_source"] = "explicit"
 			warnings = append(warnings, fmt.Sprintf("资产 %d 的企业 %d 已删除，已恢复为未归属", oldID, companyID))
 		}
+		if row["type"] == "service" && row["service_type"] == "http" {
+			prepareArchivedHTTPService(row)
+		} else if row["type"] == "endpoint" {
+			if err := prepareArchivedEndpoint(tx, taskID, row); err != nil {
+				return nil, nil, err
+			}
+		}
 		if existing, found, err := findArchiveAssetNaturalID(tx, row); err != nil {
 			return nil, nil, err
 		} else if found {
 			mapping[oldID] = existing
+			if err := mergeArchivedAsset(tx, existing, row); err != nil {
+				return nil, nil, err
+			}
 			if _, err := tx.Exec(`UPDATE assets SET updated_at=now(), task_ids=CASE WHEN $1 IN (SELECT value FROM json_each(task_ids)) THEN task_ids ELSE json_array_append(task_ids,$1) END WHERE id=$2`, taskID, existing); err != nil {
 				return nil, nil, err
 			}
@@ -455,6 +473,9 @@ func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[in
 				return nil, nil, errors.Join(findErr, fmt.Errorf("could not restore asset %d", oldID))
 			}
 			candidate = existing
+			if err := mergeArchivedAsset(tx, existing, row); err != nil {
+				return nil, nil, err
+			}
 			if _, err := tx.Exec(`UPDATE assets SET updated_at=now(), task_ids=CASE WHEN $1 IN (SELECT value FROM json_each(task_ids)) THEN task_ids ELSE json_array_append(task_ids,$1) END WHERE id=$2`, taskID, existing); err != nil {
 				return nil, nil, err
 			}
@@ -462,6 +483,92 @@ func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[in
 		mapping[oldID] = candidate
 	}
 	return mapping, warnings, nil
+}
+
+func prepareArchivedEndpoint(tx *sql.Tx, taskID int64, row map[string]any) error {
+	rawURL, _ := row["url"].(string)
+	method, _ := row["method"].(string)
+	row["method"] = strings.ToUpper(strings.TrimSpace(method))
+	identity, identityErr := identifyEndpoint(rawURL)
+	raw, err := json.Marshal(row["params"])
+	if err != nil {
+		return err
+	}
+	var params []map[string]any
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return err
+	}
+	clean, err := endpointParamsJSON(append(identity.Params, params...))
+	if err != nil {
+		return err
+	}
+	row["params"] = json.RawMessage(clean)
+	row["service_id"] = nil
+	if identityErr == nil {
+		row["url"] = identity.URL
+		store := &AssetStore{tx: tx}
+		serviceID, err := store.ensureEndpointService(identity.ServiceURL, taskID)
+		if err != nil {
+			return err
+		}
+		row["service_id"] = serviceID
+	}
+	return nil
+}
+
+func prepareArchivedHTTPService(row map[string]any) {
+	if rawURL, ok := row["url"].(string); ok {
+		canonical := canonicalHTTPServiceURL(rawURL)
+		row["url"] = canonical
+		domain, port, serviceName := parseURL(canonical)
+		rootDomain, _ := RootDomain(domain)
+		if rootDomain == "" {
+			rootDomain = domain
+		}
+		row["domain"], row["port"], row["service_name"], row["root_domain"] = domain, nullableInt(port), serviceName, rootDomain
+	}
+}
+
+func mergeArchivedAsset(tx *sql.Tx, id int64, row map[string]any) error {
+	if row["type"] == "service" && row["service_type"] == "http" {
+		technologies, err := json.Marshal(row["technologies"])
+		if err != nil {
+			return err
+		}
+		auth, err := json.Marshal(row["auth"])
+		if err != nil {
+			return err
+		}
+		statusCode, hasStatusCode := jsonInt64(row["status_code"])
+		contentLength, hasContentLength := jsonInt64(row["content_length"])
+		var statusValue, lengthValue any
+		if hasStatusCode {
+			statusValue = statusCode
+		}
+		if hasContentLength {
+			lengthValue = contentLength
+		}
+		_, err = tx.Exec(`UPDATE assets SET
+status_code=COALESCE(status_code,$2), content_length=COALESCE(content_length,$3),
+page_title=COALESCE(NULLIF(page_title,''),$4), favicon_mmh3=COALESCE(NULLIF(favicon_mmh3,''),$5),
+ip=COALESCE(NULLIF(ip,''),$6), c_segment=COALESCE(NULLIF(c_segment,''),$7),
+technologies=json_array_union(technologies,$8), auth=json_array_union(auth,$9),
+company_id=CASE WHEN company_source='explicit' AND company_id IS NOT NULL THEN company_id
+ WHEN $10 IS NOT NULL THEN $10 ELSE company_id END,
+company_source=CASE WHEN company_source='explicit' AND company_id IS NOT NULL THEN company_source
+ WHEN $10 IS NOT NULL THEN $11 ELSE company_source END
+WHERE id=$1`, id, statusValue, lengthValue, row["page_title"], row["favicon_mmh3"], row["ip"], row["c_segment"], string(technologies), string(auth), row["company_id"], row["company_source"])
+		return err
+	}
+	if row["type"] != "endpoint" {
+		return nil
+	}
+	params, err := json.Marshal(row["params"])
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE assets SET params=json_merge_params(params,$2), service_id=COALESCE($3,service_id) WHERE id=$1`, id, string(params), row["service_id"])
+	return err
 }
 
 func mergeJSONTaskID(value any, taskID int64) []int64 {
@@ -504,13 +611,21 @@ func findArchiveAssetNaturalID(tx *sql.Tx, row map[string]any) (int64, bool, err
 		}
 	case "service":
 		if stringValue("service_type") == "http" {
-			query, args = `SELECT id FROM assets WHERE type='service' AND service_type='http' AND url=$1`, []any{stringValue("url")}
+			id, err := findHTTPServiceID(tx, canonicalHTTPServiceURL(stringValue("url")))
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, false, nil
+			}
+			return id, err == nil, err
 		} else {
 			port, _ := jsonInt64(row["port"])
 			query, args = `SELECT id FROM assets WHERE type='service' AND service_type='other' AND COALESCE(domain,'')=$1 AND COALESCE(ip,'')=$2 AND port=$3 AND service_name=$4`, []any{stringValue("domain"), stringValue("ip"), port, stringValue("service_name")}
 		}
 	case "endpoint":
-		query, args = `SELECT id FROM assets WHERE type='endpoint' AND url=$1 AND method=$2`, []any{stringValue("url"), stringValue("method")}
+		canonical, err := CanonicalEndpointURL(stringValue("url"))
+		if err != nil {
+			canonical = stringValue("url") // Retained unresolved legacy endpoint.
+		}
+		query, args = `SELECT id FROM assets WHERE type='endpoint' AND url=$1 AND method=$2`, []any{canonical, strings.ToUpper(strings.TrimSpace(stringValue("method")))}
 	default:
 		return 0, false, fmt.Errorf("unsupported archived asset type %q", typeName)
 	}
@@ -527,19 +642,40 @@ func remapArchiveAssetReferences(tables map[string]json.RawMessage, mapping map[
 	for name, raw := range tables {
 		out[name] = raw
 	}
-	for _, table := range []string{"exploration_anchors", "task_asset_links"} {
+	for _, table := range []string{"exploration_anchors", "task_asset_links", "endpoint_candidates"} {
 		rows, err := decodeArchiveRows(tables[table])
 		if err != nil {
 			return nil, err
 		}
+		seen := map[string]map[string]any{}
+		kept := make([]map[string]any, 0, len(rows))
 		for _, row := range rows {
 			if old, ok := jsonInt64(row["asset_id"]); ok {
 				if replacement, exists := mapping[old]; exists {
 					row["asset_id"] = replacement
 				}
 			}
+			// Multiple legacy endpoints may now share one asset. Collapse only
+			// join-table keys, retaining non-system task provenance if available.
+			if table != "endpoint_candidates" {
+				owner := "node_id"
+				if table == "task_asset_links" {
+					owner = "task_id"
+				}
+				key := fmt.Sprint(row[owner]) + ":" + fmt.Sprint(row["asset_id"])
+				if prior, exists := seen[key]; exists {
+					if table == "task_asset_links" && prior["source"] == "system" {
+						for _, field := range []string{"source", "source_summary", "source_node_id"} {
+							prior[field] = row[field]
+						}
+					}
+					continue
+				}
+				seen[key] = row
+			}
+			kept = append(kept, row)
 		}
-		out[table], _ = json.Marshal(rows)
+		out[table], _ = json.Marshal(kept)
 	}
 	for _, table := range []string{"exploration_nodes", "findings"} {
 		rows, err := decodeArchiveRows(tables[table])
@@ -557,14 +693,21 @@ func remapArchiveAssetReferences(tables map[string]json.RawMessage, mapping map[
 				container = payload
 			}
 			if values, ok := container[key].([]any); ok {
-				for i, value := range values {
+				seen := map[string]bool{}
+				kept := []any{}
+				for _, value := range values {
 					if old, ok := jsonInt64(value); ok {
 						if replacement, exists := mapping[old]; exists {
-							values[i] = replacement
+							value = replacement
 						}
 					}
+					key := fmt.Sprint(value)
+					if !seen[key] {
+						kept = append(kept, value)
+						seen[key] = true
+					}
 				}
-				container[key] = values
+				container[key] = kept
 			}
 		}
 		out[table], _ = json.Marshal(rows)

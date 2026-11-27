@@ -60,7 +60,7 @@ npm run build:static
 
 ## Data and standards
 
-- `db/db.go` reapplies schemas at startup with `user_version=1`, rejecting higher versions. There is no migration framework: changing `CREATE TABLE IF NOT EXISTS` does not alter existing tables. Schema changes need explicit migration code or a fresh test database.
+- `db/db.go` reapplies schemas at startup with `user_version=2`, migrating schema 1 endpoint data and rejecting higher versions. There is no migration framework: changing `CREATE TABLE IF NOT EXISTS` does not alter existing tables. Schema changes need explicit migration code or a fresh test database.
 - Queries are native SQLite SQL. `db/sqlite.go` normalizes Go values/results, not PostgreSQL syntax; legacy `pg*` names do not imply PostgreSQL support.
 - When editing `standards/src-acceptance.md`, synchronize the fallback `srcAcceptanceDefault` in `agent/srcstandards.go`. Rules are injected independently of DB prompt templates; the `~~~types` catalog drives planning/reporting (`collect: no` is rejected), and disk edits take effect on the next read.
 

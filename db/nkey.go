@@ -37,6 +37,8 @@ var (
 	reUUID    = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	reHex     = regexp.MustCompile(`^[0-9a-fA-F]{16,}$`)
 	reLong    = regexp.MustCompile(`^[A-Za-z0-9_-]{24,}$`)
+	reLetter  = regexp.MustCompile(`[A-Za-z]`)
+	reDigit   = regexp.MustCompile(`[0-9]`)
 )
 
 // TemplatePath collapses high-cardinality path segments into placeholders so the
@@ -46,18 +48,33 @@ func TemplatePath(path string) string {
 		return "/"
 	}
 	segs := strings.Split(path, "/")
+	used := make(map[string]bool)
+	for _, s := range segs {
+		if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
+			used[s] = true
+		}
+	}
 	for i, s := range segs {
+		var name string
 		switch {
 		case s == "":
 			continue
 		case reNumeric.MatchString(s):
-			segs[i] = "{id}"
+			name = "id"
 		case reUUID.MatchString(s):
-			segs[i] = "{uuid}"
+			name = "uuid"
 		case reHex.MatchString(s):
-			segs[i] = "{hex}"
-		case reLong.MatchString(s):
-			segs[i] = "{token}"
+			name = "hex"
+		case reLong.MatchString(s) && reLetter.MatchString(s) && reDigit.MatchString(s):
+			name = "token"
+		}
+		if name != "" {
+			placeholder := "{" + name + "}"
+			for suffix := 2; used[placeholder]; suffix++ {
+				placeholder = "{" + name + strconv.Itoa(suffix) + "}"
+			}
+			used[placeholder] = true
+			segs[i] = placeholder
 		}
 	}
 	return strings.Join(segs, "/")

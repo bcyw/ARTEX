@@ -50,8 +50,9 @@ type Asset struct {
 	Technologies  []string         `json:"technologies,omitempty"`
 	Auth          []map[string]any `json:"auth,omitempty"`
 	// endpoint fields
-	Method string           `json:"method,omitempty"`
-	Params []map[string]any `json:"params,omitempty"`
+	Method    string           `json:"method,omitempty"`
+	ServiceID *int64           `json:"service_id,omitempty"`
+	Params    []map[string]any `json:"params,omitempty"`
 	// meta
 	Extra             map[string]any `json:"extra,omitempty"`
 	LastSeen          string         `json:"last_seen"`
@@ -659,7 +660,7 @@ func (s *AssetStore) UpsertHTTPService(req UpsertHTTPServiceReq) (int64, error) 
 			return scoped.UpsertHTTPService(req)
 		})
 	}
-	normURL := normalizeURL(req.URL)
+	normURL := canonicalHTTPServiceURL(req.URL)
 	domain, port, serviceName := parseURL(normURL)
 	rootDomain, _ := RootDomain(domain)
 	if rootDomain == "" {
@@ -921,7 +922,7 @@ func (s *AssetStore) UpsertEndpoint(req UpsertEndpointReq) (int64, error) {
 	if req.URL == "" {
 		return 0, fmt.Errorf("url is required")
 	}
-	if req.Method == "" {
+	if strings.TrimSpace(req.Method) == "" {
 		return 0, fmt.Errorf("method is required")
 	}
 	if err := ValidateAssetIP(req.IP); err != nil {
@@ -932,8 +933,12 @@ func (s *AssetStore) UpsertEndpoint(req UpsertEndpointReq) (int64, error) {
 			return scoped.UpsertEndpoint(req)
 		})
 	}
-	method := strings.ToUpper(req.Method)
-	normURL := normalizeURL(req.URL)
+	method := strings.ToUpper(strings.TrimSpace(req.Method))
+	identity, err := identifyEndpoint(req.URL)
+	if err != nil {
+		return 0, err
+	}
+	normURL := identity.URL
 	domain, port, _ := parseURL(normURL)
 	rootDomain, _ := RootDomain(domain)
 	if rootDomain == "" {
@@ -953,7 +958,11 @@ func (s *AssetStore) UpsertEndpoint(req UpsertEndpointReq) (int64, error) {
 		taskIDs = "[]"
 	}
 
-	paramsJSON, err := marshalJSONArray(req.Params)
+	paramsJSON, err := endpointParamsJSON(append(identity.Params, req.Params...))
+	if err != nil {
+		return 0, err
+	}
+	serviceID, err := s.ensureEndpointService(identity.ServiceURL, req.TaskID)
 	if err != nil {
 		return 0, err
 	}
@@ -976,13 +985,14 @@ func (s *AssetStore) UpsertEndpoint(req UpsertEndpointReq) (int64, error) {
 	err = s.tx.QueryRow(`
 INSERT INTO assets(
     type, url, method, domain, ip, port, root_domain,
-    params, company_id, company_source, task_ids, c_segment
+    params, company_id, company_source, task_ids, c_segment, service_id
 )
-VALUES ('endpoint', $1, $2, $3, $4, $5, $6, $7, $8, 'scope', $9, $10)
+VALUES ('endpoint', $1, $2, $3, $4, $5, $6, $7, $8, 'scope', $9, $10, $11)
 ON CONFLICT (url, method) WHERE type = 'endpoint' DO UPDATE SET
     params     = json_merge_params(assets.params, EXCLUDED.params),
     ip         = COALESCE(EXCLUDED.ip,        assets.ip),
     c_segment  = COALESCE(EXCLUDED.c_segment, assets.c_segment),
+    service_id = COALESCE(EXCLUDED.service_id, assets.service_id),
     task_ids   = json_array_union(assets.task_ids, EXCLUDED.task_ids),
     company_id = CASE
         WHEN assets.company_source = 'explicit' AND assets.company_id IS NOT NULL THEN assets.company_id
@@ -996,7 +1006,7 @@ ON CONFLICT (url, method) WHERE type = 'endpoint' DO UPDATE SET
     last_seen  = now()
 RETURNING id`,
 		normURL, method, domainVal, ipVal, nullableInt(port), rootDomainVal,
-		paramsJSON, companyID, taskIDs, csegVal,
+		paramsJSON, companyID, taskIDs, csegVal, serviceID,
 	).Scan(&id)
 	if err != nil {
 		return 0, err
@@ -1032,7 +1042,7 @@ SELECT id, type, company_id, task_ids,
        COALESCE(url,''), COALESCE(service_type,''), COALESCE(service_name,''),
        COALESCE(favicon_mmh3,''), status_code, content_length,
        COALESCE(page_title,''), technologies, auth,
-       COALESCE(method,''), params, extra, CAST(last_seen AS TEXT)
+       COALESCE(method,''), service_id, params, extra, CAST(last_seen AS TEXT)
 FROM assets
 WHERE type = $1
 ORDER BY last_seen DESC, id DESC
@@ -1063,7 +1073,7 @@ func (s *AssetStore) QueryByCompany(companyID int64, typ string, limit, offset i
        COALESCE(url,''), COALESCE(service_type,''), COALESCE(service_name,''),
        COALESCE(favicon_mmh3,''), status_code, content_length,
        COALESCE(page_title,''), technologies, auth,
-       COALESCE(method,''), params, extra, CAST(last_seen AS TEXT)
+       COALESCE(method,''), service_id, params, extra, CAST(last_seen AS TEXT)
 FROM assets WHERE company_id = $1`
 	args := []any{companyID}
 	if typ != "" {
@@ -1115,7 +1125,7 @@ func (s *AssetStore) QueryByTask(taskID int64, typ string, limit, offset int) ([
        COALESCE(url,''), COALESCE(service_type,''), COALESCE(service_name,''),
        COALESCE(favicon_mmh3,''), status_code, content_length,
        COALESCE(page_title,''), technologies, auth,
-       COALESCE(method,''), params, extra, CAST(last_seen AS TEXT)
+       COALESCE(method,''), service_id, params, extra, CAST(last_seen AS TEXT)
 FROM assets WHERE $1 IN (SELECT value FROM json_each(task_ids))`
 	args := []any{taskID}
 	if typ != "" {
@@ -1313,7 +1323,7 @@ const assetSelectCols = `SELECT id, type, company_id, task_ids,
        COALESCE(url,''), COALESCE(service_type,''), COALESCE(service_name,''),
        COALESCE(favicon_mmh3,''), status_code, content_length,
        COALESCE(page_title,''), technologies, auth,
-       COALESCE(method,''), params, extra, CAST(last_seen AS TEXT)
+       COALESCE(method,''), service_id, params, extra, CAST(last_seen AS TEXT)
 FROM assets`
 
 // GetByIDs returns assets with the given ids (order preserved by id array order).
@@ -1427,6 +1437,7 @@ func scanAssets(rows *sql.Rows) ([]*Asset, error) {
 		var port, statusCode sql.NullInt64
 		var contentLength sql.NullInt64
 		var companyID sql.NullInt64
+		var serviceID sql.NullInt64
 		if err := rows.Scan(
 			&a.ID, &a.Type, &companyID, &taskIDsRaw,
 			&a.Domain, &a.RootDomain, &a.IP, &a.CSegment, &port,
@@ -1436,13 +1447,17 @@ func scanAssets(rows *sql.Rows) ([]*Asset, error) {
 			&a.URL, &a.ServiceType, &a.ServiceName,
 			&a.FaviconMMH3, &statusCode, &contentLength,
 			&a.PageTitle, &techsRaw, &authRaw,
-			&a.Method, &paramsRaw, &extraRaw, &a.LastSeen,
+			&a.Method, &serviceID, &paramsRaw, &extraRaw, &a.LastSeen,
 		); err != nil {
 			return nil, err
 		}
 		if companyID.Valid {
 			cid := companyID.Int64
 			a.CompanyID = &cid
+		}
+		if serviceID.Valid {
+			sid := serviceID.Int64
+			a.ServiceID = &sid
 		}
 		if port.Valid {
 			p := int(port.Int64)

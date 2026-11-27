@@ -434,8 +434,13 @@ func (t *ToolSet) legacyRouteMethod(nodeID int64, entry string) string {
 		return ""
 	}
 	method := ""
+	canonicalEntry, err := db.CanonicalEndpointURL(entry)
+	if err != nil {
+		return ""
+	}
 	for _, asset := range assets {
-		if asset.Type != "endpoint" || normalizeRouteEntry(asset.URL) != normalizeRouteEntry(entry) {
+		canonicalAsset, err := db.CanonicalEndpointURL(asset.URL)
+		if asset.Type != "endpoint" || err != nil || canonicalAsset != canonicalEntry {
 			continue
 		}
 		m := strings.ToUpper(strings.TrimSpace(asset.Method))

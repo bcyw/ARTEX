@@ -1,5 +1,38 @@
 -- SQLite business database. New schema changes must be versioned in db.go.
 
+-- Task-local endpoint hypotheses and their observation history. Confirmed
+-- candidates link to the global asset; they are never a new assets.type.
+CREATE TABLE IF NOT EXISTS endpoint_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    service_url TEXT NOT NULL,
+    path_template TEXT NOT NULL,
+    method TEXT NOT NULL DEFAULT '',
+    params JSON NOT NULL DEFAULT '[]',
+    observations JSON NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed')),
+    reason TEXT NOT NULL DEFAULT '',
+    asset_id INTEGER REFERENCES assets(id) ON DELETE SET NULL,
+    UNIQUE(task_id, service_url, path_template, method)
+);
+
+-- Historical IDs deliberately have no foreign key: the audit must survive
+-- deduplication and later deletion of assets/tasks.
+CREATE TABLE IF NOT EXISTS endpoint_migration_audit (
+    legacy_asset_id INTEGER PRIMARY KEY,
+    canonical_asset_id INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    snapshot JSON NOT NULL,
+    migrated_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now') || '000000+00:00')
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_endpoint_candidate_asset_deleted
+AFTER UPDATE OF asset_id ON endpoint_candidates
+WHEN NEW.asset_id IS NULL AND OLD.asset_id IS NOT NULL
+BEGIN
+    UPDATE endpoint_candidates SET status='pending', reason='confirmed asset was deleted' WHERE id=NEW.id;
+END;
+
 CREATE TABLE IF NOT EXISTS companies (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
@@ -45,6 +78,7 @@ CREATE TABLE IF NOT EXISTS assets (
     auth JSON CHECK (json_valid(auth)) NOT NULL DEFAULT '[]',
     method          TEXT,
     params JSON CHECK (json_valid(params)) NOT NULL DEFAULT '[]',
+    service_id      INTEGER REFERENCES assets(id) ON DELETE SET NULL,
     extra JSON CHECK (json_valid(extra))   NOT NULL DEFAULT '{}',
     created_at      DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now') || '000000+00:00'),
     last_seen       DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now') || '000000+00:00'),
