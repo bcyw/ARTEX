@@ -3,10 +3,11 @@
 #
 # 用法：
 #   ./start.sh                       前台运行（Ctrl-C 停止）
+#   ./start.sh build                 从源码编译后启动（也支持 --build）
 #   nohup ./start.sh >artex.log 2>&1 &   后台常驻
-#   ./start.sh -addr :9000           额外参数原样透传给 artex
+#   ./start.sh build -addr :9000     编译后启动，额外参数原样透传给 artex
 #
-# 它只做一件事：把 artex 跑起来，进程退出后按退出码决定要不要再拉起。
+# 默认直接启动；build 模式先编译一次，随后按退出码决定要不要再拉起。
 #
 #   0      用户正常停止        → 退出循环
 #   75     程序请求重启        → 立刻重跑（页面点了"一键更新"或"回滚"）
@@ -21,6 +22,18 @@ set -u
 cd "$(dirname "$0")" || exit 1
 
 BIN=./artex
+case "${1:-}" in
+	build|--build)
+		shift
+		[ -x ./build.sh ] || { echo "[artex] 找不到可执行的构建脚本 ./build.sh（需要源码目录）" >&2; exit 1; }
+		command -v go >/dev/null 2>&1 || { echo "[artex] 未检测到 Go，无法从源码编译" >&2; exit 1; }
+		host_os=$(go env GOHOSTOS) || exit $?
+		host_arch=$(go env GOHOSTARCH) || exit $?
+		echo "[artex] 编译当前系统版本后启动…"
+		ARTEX_OUTPUT="$BIN" ARTEX_RELEASE=0 ARTEX_PACKAGE=0 \
+			./build.sh --target "$host_os/$host_arch" || exit $?
+		;;
+esac
 [ -x "$BIN" ] || { echo "[artex] 找不到可执行文件 $BIN" >&2; exit 1; }
 
 RESTART_CODE=75

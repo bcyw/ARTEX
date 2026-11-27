@@ -147,15 +147,15 @@ docker compose up -d --build  # 从源码构建并启动 ARTEX，自动创建 SQ
 
 ### 方式四：从源码编译单二进制
 
+Linux/macOS 安装 Go（版本见 `go.mod`）、Node.js/npm 和 rsync 后，在源码目录执行：
+
 ```bash
-# 1) 前端静态导出
-cd web && npm ci && npm run build:static && cd ..
-# 2) 拷进内嵌目录
-cp -r web/out server/webui/dist
-# 3) 编译（-tags embedui 才内嵌前端）
-CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
-./start.sh
+./start.sh build                      # 编译前端和后端，成功后立即启动
+# ./start.sh --build                  # 等价写法
+./start.sh build -addr :9000          # 可将后端参数接在 build 后
 ```
+
+该入口复用 `build.sh`，构建本机目标并将内嵌前端的新程序写入根目录 `./artex`，确保运行的就是本次编译产物。编译失败直接退出，不启动旧程序；守护重启时不会重复编译。日常无需重新编译时，仍使用 `./start.sh`。Windows `start.bat` 仍仅启动已有的 `artex.exe`。
 
 ### 方式五：构建跨平台 Release 压缩包
 
@@ -247,12 +247,11 @@ cp -r <解压目录>/skills ./ && cp <解压目录>/artex ./
 
 ### 方式五：从源码编译
 
+停止旧实例后，在 Linux/macOS 的源码目录执行：
+
 ```bash
 git pull
-cd web && npm ci && npm run build:static && cd ..
-cp -r web/out server/webui/dist
-CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
-# 重启 ./start.sh
+./start.sh build                      # 重新编译并启动本次产物
 ```
 
 ---
@@ -278,7 +277,7 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 
-**常用参数**：`./start.sh -addr :8787 -proxy :8788`（`-addr` 前端+API，`-proxy` 流量录制代理）。启动脚本会把参数原样透传给 `artex`。
+**常用参数**：`./start.sh -addr :8787 -proxy :8788`（`-addr` 前端+API，`-proxy` 流量录制代理）。除首个 `build` / `--build` 模式参数外，启动脚本会把参数原样透传给 `artex`。
 
 ### 反向代理部署（HTTPS / 只开放 443）
 

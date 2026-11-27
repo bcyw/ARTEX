@@ -53,18 +53,124 @@ class UnixLauncherTests(unittest.TestCase):
             with self.subTest(script=path.name):
                 subprocess.run([shell, '-n', str(path)], check=True, capture_output=True)
 
-    def launch(self, folder, shell, backend):
+    def launch(self, folder, shell, backend, args=None, env=None):
         target = Path(folder)
         shutil.copyfile(ROOT / 'start.sh', target / 'start.sh')
         stub = target / 'artex'
         stub.write_text('#!/bin/sh\n' + backend, encoding='utf-8')
         stub.chmod(0o755)
         return subprocess.Popen(
-            [shell, str(target / 'start.sh'), '-data', 'test space'],
-            cwd=ROOT, env={**os.environ, 'LC_ALL': 'C'},
+            [shell, str(target / 'start.sh'), *(args if args is not None else ['-data', 'test space'])],
+            cwd=ROOT, env={**os.environ, 'LC_ALL': 'C', **(env or {})},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding='utf-8', start_new_session=True,
         )
+
+    def build_fixture(self, folder, builder):
+        target = Path(folder)
+        target.joinpath('bin').mkdir()
+        compiler = target / 'bin/go'
+        compiler.write_text('''#!/bin/sh
+case "$*" in
+    'env GOHOSTOS') printf 'darwin\\n';;
+    'env GOHOSTARCH') printf 'arm64\\n';;
+    *) exit 89;;
+esac
+''', encoding='utf-8')
+        compiler.chmod(0o755)
+        script = target / 'build.sh'
+        script.write_text('#!/bin/sh\n' + builder, encoding='utf-8')
+        script.chmod(0o755)
+        return {
+            'PATH': str(target / 'bin') + os.pathsep + os.environ['PATH'],
+            'GOOS': 'windows', 'GOARCH': '386',
+            'ARTEX_RELEASE': '1', 'ARTEX_PACKAGE': '1',
+            'ARTEX_TARGETS': 'linux/amd64,windows/amd64',
+            'ARTEX_OUTPUT': 'wrong-output',
+        }
+
+    def test_build_then_run_uses_native_output_and_preserves_arguments(self):
+        builder = '''
+[ "$#" -eq 2 ] && [ "$1" = --target ] && [ "$2" = darwin/arm64 ] || exit 88
+[ "$ARTEX_RELEASE" = 0 ] && [ "$ARTEX_PACKAGE" = 0 ] || exit 87
+printf 'build\\n' >> events
+cat > "$ARTEX_OUTPUT" <<'BACKEND'
+#!/bin/sh
+[ "$#" -eq 2 ] && [ "$1" = -data ] && [ "$2" = 'test space' ] || exit 86
+printf 'run\\n' >> events
+exit 0
+BACKEND
+chmod +x "$ARTEX_OUTPUT"
+'''
+        for shell in ('sh', 'bash'):
+            for mode in ('build', '--build'):
+                with self.subTest(shell=shell, mode=mode), tempfile.TemporaryDirectory(prefix='artex build ') as folder:
+                    env = self.build_fixture(folder, builder)
+                    proc = self.launch(folder, shell, "printf 'stale\\n' >> events\nexit 0\n",
+                                       args=[mode, '-data', 'test space'], env=env)
+                    try:
+                        stdout, stderr = proc.communicate(timeout=5)
+                        self.assertEqual(proc.returncode, 0, stdout + stderr)
+                        self.assertEqual(Path(folder, 'events').read_text().splitlines(), ['build', 'run'])
+                        self.assertFalse(Path(folder, 'wrong-output').exists())
+                    finally:
+                        self.finish(proc)
+
+    def test_build_failure_does_not_run_existing_binary(self):
+        for shell in ('sh', 'bash'):
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory(prefix='artex build failure ') as folder:
+                env = self.build_fixture(folder, "printf 'build\\n' >> events\nexit 23\n")
+                proc = self.launch(folder, shell, "printf 'stale\\n' >> events\nexit 0\n",
+                                   args=['build'], env=env)
+                try:
+                    stdout, stderr = proc.communicate(timeout=5)
+                    self.assertEqual(proc.returncode, 23, stdout + stderr)
+                    self.assertEqual(Path(folder, 'events').read_text().splitlines(), ['build'])
+                finally:
+                    self.finish(proc)
+
+    def test_build_is_not_repeated_after_update_or_crash(self):
+        backend = '''
+printf 'run\\n' >> events
+attempt=0
+[ ! -f attempts ] || attempt=$(cat attempts)
+attempt=$((attempt + 1))
+printf '%s' "$attempt" > attempts
+case "$attempt" in 1) exit 75;; 2) exit 9;; *) exit 0;; esac
+'''
+        for shell in ('sh', 'bash'):
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory(prefix='artex build restart ') as folder:
+                env = self.build_fixture(folder, "printf 'build\\n' >> events\n")
+                proc = self.launch(folder, shell, backend, args=['build'], env=env)
+                try:
+                    stdout, stderr = proc.communicate(timeout=8)
+                    self.assertEqual(proc.returncode, 0, stdout + stderr)
+                    self.assertEqual(Path(folder, 'events').read_text().splitlines(),
+                                     ['build', 'run', 'run', 'run'])
+                finally:
+                    self.finish(proc)
+
+    def test_normal_start_does_not_build(self):
+        with tempfile.TemporaryDirectory(prefix='artex normal start ') as folder:
+            env = self.build_fixture(folder, "printf 'build\\n' >> events\nexit 23\n")
+            proc = self.launch(folder, 'sh', "printf 'run\\n' >> events\nexit 0\n", env=env)
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+                self.assertEqual(proc.returncode, 0, stdout + stderr)
+                self.assertEqual(Path(folder, 'events').read_text().splitlines(), ['run'])
+            finally:
+                self.finish(proc)
+
+    def test_build_requires_source_checkout(self):
+        with tempfile.TemporaryDirectory(prefix='artex missing builder ') as folder:
+            proc = self.launch(folder, 'sh', "printf 'stale\\n' >> events\nexit 0\n", args=['build'])
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+                self.assertEqual(proc.returncode, 1, stdout + stderr)
+                self.assertIn('build.sh', stderr)
+                self.assertFalse(Path(folder, 'events').exists())
+            finally:
+                self.finish(proc)
 
     def finish(self, proc):
         if proc.poll() is None:
